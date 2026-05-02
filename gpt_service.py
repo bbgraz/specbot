@@ -11,20 +11,34 @@ from typing import Any
 from openai import OpenAI
 
 DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
+WHISPER_MODEL = os.getenv("OPENAI_WHISPER_MODEL", "whisper-1")
 
 SYSTEM_PROMPT = """You are SpecBot, an AI assistant for apparel technical designers.
-You analyze sketches, reference images, and metadata to draft a tech pack.
+You analyze sketches, reference images, and metadata to draft a tech pack
+**grounded in the brand's library** of fabrics, trims, construction standards,
+and historical styles. The brand library is provided in the user message; use
+it as the authoritative source for fabric codes, trim codes, and house
+construction standards.
 
 Strict rules:
 - Never invent certainty. If the image is unclear, say so in missing_information.
 - Every measurement, BOM item, and construction note must be labeled with one of:
-    "derived_from_input"             (visible in the sketch / explicit in metadata)
+    "matched_from_brand_library"      (explicit code or standard from the brand library context)
+    "derived_from_input"              (visible in the sketch / explicit in metadata)
     "inferred_from_standard_practice" (industry-standard for this garment type)
-    "placeholder_for_review"         (best guess, must be confirmed by a tech designer)
+    "placeholder_for_review"          (best guess, must be confirmed by a tech designer)
+- Prefer matched_from_brand_library whenever a brand-library entry applies.
+- When citing a fabric or trim, use the exact code from the brand library
+  (e.g. "FBR-0001", "TRM-LBL-001"). Never invent a code.
 - Use inches for measurements unless otherwise specified.
 - Provide tolerance_plus and tolerance_minus as decimal inches (e.g. "0.25").
 - Output ONLY valid JSON matching the schema. No prose, no markdown fences.
 """
+
+_SOURCE_VALUES = (
+    "matched_from_brand_library | derived_from_input | "
+    "inferred_from_standard_practice | placeholder_for_review"
+)
 
 JSON_SCHEMA_HINT = {
     "garment_summary": "string - 2-3 sentence description of the garment",
@@ -36,23 +50,27 @@ JSON_SCHEMA_HINT = {
             "target": "target value in inches as string",
             "tolerance_plus": "decimal string",
             "tolerance_minus": "decimal string",
-            "source": "derived_from_input | inferred_from_standard_practice | placeholder_for_review",
+            "source": _SOURCE_VALUES,
             "notes": "string",
         }
     ],
     "construction_notes": [
         {
             "note": "construction detail",
-            "source": "derived_from_input | inferred_from_standard_practice | placeholder_for_review",
+            "zone": "construction zone (e.g. 'Neckline', 'Side seam', 'Hem')",
+            "stitch_type": "ISO 4915 stitch (e.g. '301 — Lockstitch') or ''",
+            "seam_class": "ISO 4916 seam (e.g. '1.01.01 — Superimposed (plain seam)') or ''",
+            "spi": "stitches per inch as string or ''",
+            "source": _SOURCE_VALUES,
         }
     ],
     "bom_items": [
         {
             "component": "e.g. Self fabric, Main label, Care label, Buttons",
-            "material": "material spec",
+            "material": "material spec — include brand library code (FBR-/TRM-) if applicable",
             "placement": "where it goes",
             "notes": "string",
-            "source": "derived_from_input | inferred_from_standard_practice | placeholder_for_review",
+            "source": _SOURCE_VALUES,
         }
     ],
     "assumptions": ["list of assumptions made"],
@@ -98,6 +116,7 @@ def _build_user_content(
     file_bytes: bytes | None,
     mime_type: str | None,
     metadata: dict[str, Any],
+    grounding_block: str = "",
 ) -> list[dict[str, Any]]:
     metadata_block = (
         "Style metadata provided by the designer:\n"
@@ -106,7 +125,8 @@ def _build_user_content(
         f"- Garment type: {metadata.get('garment_type') or 'N/A'}\n"
         f"- Fabric: {metadata.get('fabric') or 'N/A'}\n"
         f"- Sample size: {metadata.get('sample_size') or 'N/A'}\n\n"
-        "Return JSON with keys: "
+        + (f"{grounding_block}\n\n" if grounding_block else "")
+        + "Return JSON with keys: "
         "garment_summary, detected_features, suggested_measurements, "
         "construction_notes, bom_items, assumptions, missing_information.\n\n"
         f"Schema hint: {json.dumps(JSON_SCHEMA_HINT)}"
@@ -164,10 +184,15 @@ def _safe_json_loads(text: str) -> dict[str, Any]:
         raise
 
 
-def analyze_sketch(file: Any | None, metadata: dict[str, Any]) -> dict[str, Any]:
+def analyze_sketch(
+    file: Any | None,
+    metadata: dict[str, Any],
+    grounding_block: str = "",
+) -> dict[str, Any]:
     """Analyze an uploaded sketch / PDF / image and return a structured tech pack draft.
 
     `file` is a Streamlit UploadedFile (has `.read()`, `.type`, `.name`) or None.
+    `grounding_block` is the brand-library context string (see brand_library.grounding_for_prompt).
     """
     file_bytes: bytes | None = None
     mime_type: str | None = None
@@ -176,7 +201,7 @@ def analyze_sketch(file: Any | None, metadata: dict[str, Any]) -> dict[str, Any]
         mime_type = getattr(file, "type", None) or "application/octet-stream"
 
     client = _client()
-    user_content = _build_user_content(file_bytes, mime_type, metadata)
+    user_content = _build_user_content(file_bytes, mime_type, metadata, grounding_block)
 
     response = client.chat.completions.create(
         model=DEFAULT_MODEL,
@@ -198,6 +223,87 @@ def analyze_sketch(file: Any | None, metadata: dict[str, Any]) -> dict[str, Any]
         "bom_items": data.get("bom_items", []) or [],
         "assumptions": data.get("assumptions", []) or [],
         "missing_information": data.get("missing_information", []) or [],
+    }
+
+
+def transcribe_audio(file_bytes: bytes, filename: str = "fitting.m4a") -> str:
+    """Transcribe an audio recording (Voice Memo, m4a/wav/mp3/webm) via Whisper.
+
+    Returns the plain-text transcript. Raises on API errors so the UI can show them.
+    """
+    if not file_bytes:
+        return ""
+    client = _client()
+    buf = io.BytesIO(file_bytes)
+    buf.name = filename or "fitting.m4a"
+    response = client.audio.transcriptions.create(
+        model=WHISPER_MODEL,
+        file=buf,
+        response_format="text",
+    )
+    if isinstance(response, str):
+        return response.strip()
+    return getattr(response, "text", "").strip()
+
+
+def draft_fitting_email(
+    tech_pack: dict[str, Any],
+    transcript: str,
+    structured_updates: list[dict[str, Any]],
+    pinned_photos: list[dict[str, Any]],
+    factory_name: str = "",
+    contact_name: str = "",
+) -> dict[str, str]:
+    """Ask the model to write a fit-session factory email from the captured artifacts."""
+    client = _client()
+
+    update_lines = []
+    for u in structured_updates or []:
+        pom = u.get("pom") or "(unmatched)"
+        delta = u.get("delta") or u.get("new_target") or ""
+        reason = u.get("reason") or ""
+        update_lines.append(f"- {pom}: {delta}  ({reason})")
+    photo_lines = [
+        f"- Zone: {p.get('zone', '')} — {p.get('note', '')}"
+        for p in (pinned_photos or [])
+    ]
+
+    style_label = (
+        f"{tech_pack.get('style_number', '')} {tech_pack.get('style_name', '')}".strip()
+        or "(unnamed style)"
+    )
+
+    system = (
+        "You are SpecBot's fitting-room assistant. Write a concise, professional email "
+        "from the technical designer to the factory after a fit session. Tone: warm but "
+        "specific. Lead with the POM changes, then call out any pattern flags, then ask "
+        "for the next sample with a target date if mentioned. Output JSON ONLY."
+    )
+    user = (
+        f"Style: {style_label}\n"
+        f"Stage: {tech_pack.get('sample_stage', '')}\n"
+        f"Factory: {factory_name or '(unspecified)'}\n"
+        f"Contact: {contact_name or '(unspecified)'}\n\n"
+        f"Live transcript:\n\"\"\"\n{transcript}\n\"\"\"\n\n"
+        f"Structured POM updates:\n" + ("\n".join(update_lines) or "(none)") + "\n\n"
+        f"Pinned photo notes:\n" + ("\n".join(photo_lines) or "(none)") + "\n\n"
+        'Return JSON: {"subject": "string", "body": "string"}'
+    )
+
+    response = client.chat.completions.create(
+        model=DEFAULT_MODEL,
+        temperature=0.3,
+        response_format={"type": "json_object"},
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+    )
+    raw = response.choices[0].message.content or "{}"
+    data = _safe_json_loads(raw)
+    return {
+        "subject": data.get("subject", "").strip() or f"[SpecBot] Fit comments — {style_label}",
+        "body": data.get("body", "").strip(),
     }
 
 

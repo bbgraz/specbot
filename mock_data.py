@@ -93,8 +93,24 @@ DEFAULT_GRADE_RULES: dict[str, float] = {
 DEFAULT_SIZE_RUN: list[str] = ["XS", "S", "M", "L", "XL", "XXL"]
 
 
-def _grade_rule_for_pom(pom_name: str) -> float:
-    name = (pom_name or "").lower()
+def _grade_rule_for_pom(
+    pom_name: str,
+    rule_overrides: dict[str, float] | None = None,
+) -> float:
+    """Resolve the grade rule for a POM.
+
+    `rule_overrides` is an optional dict keyed on either the exact POM name
+    (preferred) or a keyword substring (fallback to `DEFAULT_GRADE_RULES`).
+    """
+    name = (pom_name or "").lower().strip()
+    if rule_overrides:
+        if name in {k.lower() for k in rule_overrides}:
+            for k, v in rule_overrides.items():
+                if k.lower() == name:
+                    return float(v)
+        for keyword, rule in rule_overrides.items():
+            if keyword and keyword.lower() in name:
+                return float(rule)
     for keyword, rule in DEFAULT_GRADE_RULES.items():
         if keyword in name:
             return rule
@@ -105,10 +121,12 @@ def build_graded_table(
     measurements: list[dict[str, Any]],
     sample_size: str = "M",
     size_run: list[str] | None = None,
+    rule_overrides: dict[str, float] | None = None,
 ) -> list[dict[str, Any]]:
-    """Project the sample-size POMs across a full size run using default grade rules.
+    """Project the sample-size POMs across a full size run using grade rules.
 
-    Pure presentation: the brand's real grade rules would replace these.
+    `rule_overrides` lets the brand replace the generic defaults with house rules,
+    keyed by exact POM name (preferred) or by keyword.
     """
     sizes = size_run or DEFAULT_SIZE_RUN
     sample = (sample_size or "M").upper()
@@ -122,7 +140,7 @@ def build_graded_table(
             base = float(m.get("target", "") or 0)
         except (TypeError, ValueError):
             base = 0.0
-        rule = _grade_rule_for_pom(m.get("pom", ""))
+        rule = _grade_rule_for_pom(m.get("pom", ""), rule_overrides)
         row = {"POM": m.get("pom", ""), "Grade rule (in)": f"±{rule:g}"}
         for i, size in enumerate(sizes):
             offset = (i - sample_idx) * rule
@@ -597,25 +615,29 @@ def get_grounding_report(garment_type: str) -> dict[str, Any]:
 
 FEATURE_ROADMAP: list[dict[str, str]] = [
     {"feature": "AI sketch → tech pack", "status": "live"},
+    {"feature": "Brand library grounding (fabrics, trims, construction)", "status": "live"},
     {"feature": "Editable measurement table", "status": "live"},
     {"feature": "Construction notes", "status": "live"},
     {"feature": "BOM table", "status": "live"},
     {"feature": "Excel export (multi-sheet)", "status": "live"},
     {"feature": "Fitting-note → POM updates", "status": "live"},
+    {"feature": "Voice transcription (Whisper)", "status": "live"},
+    {"feature": "Fit photos pinned to construction zones", "status": "live"},
+    {"feature": "AI-drafted factory email from fit session", "status": "live"},
     {"feature": "Change log", "status": "live"},
     {"feature": "Sample stage tracking", "status": "live"},
     {"feature": "Send to factory (test mode)", "status": "live"},
     {"feature": "WIP dashboard", "status": "live"},
     {"feature": "ISO 4915 / 4916 stitch & seam codes", "status": "live"},
-    {"feature": "Grading across full size run", "status": "preview"},
+    {"feature": "Grading across full size run", "status": "live"},
+    {"feature": "Sketch annotations / callouts", "status": "live"},
+    {"feature": "Tech-pack persistence (resume work across sessions)", "status": "live"},
     {"feature": "Costing rollup → target FOB", "status": "preview"},
     {"feature": "Colorways & Pantone tracking", "status": "preview"},
     {"feature": "Lab dip / strike-off / handloom approvals", "status": "preview"},
-    {"feature": "Sketch annotations / callouts", "status": "preview"},
-    {"feature": "Fit photos with markup", "status": "preview"},
+    {"feature": "Drag-to-pin annotations on sketch", "status": "preview"},
     {"feature": "Revision history & diff", "status": "preview"},
-    {"feature": "Voice + photo fitting capture (iPad)", "status": "preview"},
-    {"feature": "Brand library RAG (fabric / trim / historical)", "status": "preview"},
+    {"feature": "Live in-browser mic capture", "status": "preview"},
     {"feature": "PLM sync (Centric / Backbone / FlexPLM)", "status": "preview"},
     {"feature": "CSV / Drive folder ingest", "status": "preview"},
     {"feature": "Factory reply intake", "status": "preview"},
