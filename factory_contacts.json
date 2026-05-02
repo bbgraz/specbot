@@ -1,0 +1,92 @@
+[
+  {
+    "factory_id": "FAC-001",
+    "factory_name": "Lotus Apparel Manufacturing",
+    "country": "Vietnam",
+    "specialty": "Knitwear and jersey tops",
+    "contacts": [
+      {
+        "name": "Linh Nguyen",
+        "title": "Production Manager",
+        "email": "linh.nguyen@example-lotus.demo"
+      },
+      {
+        "name": "Hai Tran",
+        "title": "Technical Account Lead",
+        "email": "hai.tran@example-lotus.demo"
+      }
+    ]
+  },
+  {
+    "factory_id": "FAC-002",
+    "factory_name": "Andes Denim Works",
+    "country": "Peru",
+    "specialty": "Denim, woven bottoms, washes",
+    "contacts": [
+      {
+        "name": "Maria Quispe",
+        "title": "Sample Room Lead",
+        "email": "maria.quispe@example-andes.demo"
+      },
+      {
+        "name": "Carlos Vega",
+        "title": "Merchandiser",
+        "email": "carlos.vega@example-andes.demo"
+      }
+    ]
+  },
+  {
+    "factory_id": "FAC-003",
+    "factory_name": "Istanbul Outerwear Co.",
+    "country": "Turkey",
+    "specialty": "Outerwear, technical jackets",
+    "contacts": [
+      {
+        "name": "Ayse Demir",
+        "title": "Head of Development",
+        "email": "ayse.demir@example-istanbul.demo"
+      },
+      {
+        "name": "Mert Yilmaz",
+        "title": "Quality Director",
+        "email": "mert.yilmaz@example-istanbul.demo"
+      }
+    ]
+  },
+  {
+    "factory_id": "FAC-004",
+    "factory_name": "Dhaka Knit House",
+    "country": "Bangladesh",
+    "specialty": "Cut and sew knit, basics, large MOQ",
+    "contacts": [
+      {
+        "name": "Rafiq Hossain",
+        "title": "Senior Merchandiser",
+        "email": "rafiq.hossain@example-dhaka.demo"
+      },
+      {
+        "name": "Nadia Rahman",
+        "title": "Compliance Lead",
+        "email": "nadia.rahman@example-dhaka.demo"
+      }
+    ]
+  },
+  {
+    "factory_id": "FAC-005",
+    "factory_name": "Porto Atelier",
+    "country": "Portugal",
+    "specialty": "Premium woven, shirting, small batch",
+    "contacts": [
+      {
+        "name": "Sofia Almeida",
+        "title": "Atelier Director",
+        "email": "sofia.almeida@example-porto.demo"
+      },
+      {
+        "name": "Joao Silva",
+        "title": "Pattern and Fit Lead",
+        "email": "joao.silva@example-porto.demo"
+      }
+    ]
+  }
+]
