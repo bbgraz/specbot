@@ -293,10 +293,97 @@ def sidebar() -> None:
 # ---------------------------------------------------------------------------
 
 
-def section_header() -> None:
-    st.title("SpecBot AI Technical Designer")
-    st.caption(
-        "Turn sketches and fitting notes into factory-ready tech packs in minutes."
+def _inject_css() -> None:
+    """One-shot CSS to tighten Streamlit's default chrome and brand the surface."""
+    st.markdown(
+        """
+        <style>
+        /* Hide Streamlit's default toolbar + footer for a cleaner product feel. */
+        [data-testid="stToolbar"], #MainMenu, footer { visibility: hidden; height: 0; }
+        header[data-testid="stHeader"] { background: transparent; height: 0; }
+
+        /* Tighter top/bottom padding on the main canvas. */
+        .block-container { padding-top: 1.25rem; padding-bottom: 2rem; max-width: 1400px; }
+
+        /* Top-level tab strip — make it feel like real navigation. */
+        div[data-testid="stTabs"] > div[role="tablist"] {
+            gap: 0.25rem;
+            border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+            padding-bottom: 0;
+            margin-bottom: 1.25rem;
+        }
+        div[data-testid="stTabs"] > div[role="tablist"] button[role="tab"] {
+            padding: 0.55rem 1rem;
+            border-radius: 6px 6px 0 0;
+            font-weight: 500;
+            color: rgba(148, 163, 184, 0.95);
+            border-bottom: 2px solid transparent;
+            transition: color 120ms, border-color 120ms;
+        }
+        div[data-testid="stTabs"] > div[role="tablist"] button[role="tab"]:hover {
+            color: white;
+        }
+        div[data-testid="stTabs"] > div[role="tablist"] button[role="tab"][aria-selected="true"] {
+            color: white;
+            border-bottom-color: #6366F1;
+        }
+
+        /* Compact hero. */
+        .specbot-hero h1 {
+            font-size: 1.85rem;
+            margin-bottom: 0.15rem;
+            letter-spacing: -0.02em;
+        }
+        .specbot-hero p.specbot-tagline {
+            color: rgba(148, 163, 184, 0.95);
+            margin: 0;
+            font-size: 1rem;
+        }
+
+        /* Status strip showing the loaded style. */
+        .specbot-status-strip {
+            display: flex;
+            gap: 1.25rem;
+            padding: 0.65rem 1rem;
+            margin: 0.75rem 0 1rem;
+            background: rgba(99, 102, 241, 0.08);
+            border: 1px solid rgba(99, 102, 241, 0.25);
+            border-radius: 8px;
+            font-size: 0.92rem;
+        }
+        .specbot-status-strip .pill { font-weight: 600; color: white; }
+        .specbot-status-strip .label { color: rgba(148, 163, 184, 0.95); margin-right: 0.35rem; }
+
+        /* Subheader rhythm inside tabs. */
+        h2 { font-size: 1.4rem; margin-top: 0.25rem; }
+        h3 { font-size: 1.1rem; }
+
+        /* Metric polish. */
+        [data-testid="stMetric"] {
+            background: rgba(148, 163, 184, 0.06);
+            border: 1px solid rgba(148, 163, 184, 0.15);
+            border-radius: 8px;
+            padding: 0.65rem 0.85rem;
+        }
+
+        /* Sidebar tightening. */
+        [data-testid="stSidebar"] .block-container { padding-top: 1.5rem; }
+        [data-testid="stSidebar"] hr { margin: 0.6rem 0; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _hero() -> None:
+    st.markdown(
+        """
+        <div class="specbot-hero">
+          <h1>SpecBot — AI Technical Designer</h1>
+          <p class="specbot-tagline">From sketch and fitting notes to factory-ready tech packs, grounded in your brand library.</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
     if not os.getenv("OPENAI_API_KEY"):
         st.warning(
@@ -306,8 +393,35 @@ def section_header() -> None:
         )
 
 
+def _status_strip() -> None:
+    tech_pack = st.session_state.tech_pack
+    if not tech_pack.get("style_number"):
+        return
+    style_no = tech_pack.get("style_number") or "(no #)"
+    style_name = tech_pack.get("style_name") or "(no name)"
+    stage = tech_pack.get("sample_stage", DEFAULT_STAGE)
+    garment = tech_pack.get("garment_type") or "—"
+    sample_size = tech_pack.get("sample_size") or "—"
+    st.markdown(
+        f"""
+        <div class="specbot-status-strip">
+          <div><span class="label">Style</span><span class="pill">{style_no}</span></div>
+          <div><span class="label">Name</span><span class="pill">{style_name}</span></div>
+          <div><span class="label">Type</span><span class="pill">{garment}</span></div>
+          <div><span class="label">Sample size</span><span class="pill">{sample_size}</span></div>
+          <div><span class="label">Stage</span><span class="pill">{stage}</span></div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def section_header() -> None:
+    """Backwards-compatible shim for the old call site."""
+    _hero()
+
+
 def section_brand_library() -> None:
-    st.header(f"1. Brand Library  {PREVIEW_BADGE}")
     st.markdown(
         f"**This is what the AI knows about {MOCK_BRAND_NAME}.** Without this layer, "
         "every tech pack is a generic guess. SpecBot syncs from the brand's existing "
@@ -326,6 +440,7 @@ def section_brand_library() -> None:
     history_count = len(MOCK_BRAND_HISTORICAL_STYLES)
     factories_count = len(MOCK_FACTORY_PROFILES)
     cstd_count = len(MOCK_BRAND_CONSTRUCTION_STANDARDS)
+
 
     cols = st.columns(5)
     cols[0].metric("Fabrics", fabrics_count)
@@ -423,7 +538,7 @@ def section_brand_library() -> None:
 
 
 def section_style_setup() -> None:
-    st.header("2. Style setup")
+    st.markdown("Drop a sketch and a few fields. Output appears in the **Tech Pack** tab.")
     with st.form("style_setup_form", clear_on_submit=False):
         upload = st.file_uploader(
             "Upload sketch (PDF, JPG, PNG)",
@@ -712,7 +827,6 @@ def _tab_assumptions(tech_pack: dict[str, Any]) -> None:
 
 
 def section_tech_pack_preview() -> None:
-    st.header("3. Generated tech pack preview")
     tech_pack = st.session_state.tech_pack
     if not tech_pack.get("style_number") and not tech_pack.get("garment_summary"):
         st.info("Generate a tech pack to see the preview.", icon="ℹ️")
@@ -903,7 +1017,6 @@ def _render_paste_notes_tab(tech_pack: dict[str, Any]) -> None:
 
 
 def section_fitting_notes() -> None:
-    st.header("4. Fitting")
     tech_pack = st.session_state.tech_pack
     if not tech_pack.get("style_number"):
         st.info("Generate a tech pack first.", icon="ℹ️")
@@ -917,7 +1030,6 @@ def section_fitting_notes() -> None:
 
 
 def section_send_to_factory() -> None:
-    st.header("5. Send to factory")
     tech_pack = st.session_state.tech_pack
     factories = load_factories()
     if not factories:
@@ -1020,7 +1132,6 @@ def section_send_to_factory() -> None:
 
 
 def section_wip_dashboard() -> None:
-    st.header("6. WIP dashboard")
     records = load_wip_records()
     if not records:
         st.info("No WIP records yet. Send a tech pack to populate the dashboard.", icon="ℹ️")
@@ -1049,16 +1160,40 @@ def section_wip_dashboard() -> None:
 
 
 def main() -> None:
-    st.set_page_config(page_title="SpecBot AI Technical Designer", layout="wide")
+    st.set_page_config(
+        page_title="SpecBot — AI Technical Designer",
+        layout="wide",
+        initial_sidebar_state="expanded",
+    )
     _init_state()
+    _inject_css()
     sidebar()
-    section_header()
-    section_brand_library()
-    section_style_setup()
-    section_tech_pack_preview()
-    section_fitting_notes()
-    section_send_to_factory()
-    section_wip_dashboard()
+    _hero()
+    _status_strip()
+
+    nav = st.tabs(
+        [
+            f"Brand Library  {PREVIEW_BADGE}",
+            "Style Setup",
+            "Tech Pack",
+            "Fitting",
+            "Send to Factory",
+            "WIP Dashboard",
+        ]
+    )
+    with nav[0]:
+        section_brand_library()
+    with nav[1]:
+        section_style_setup()
+    with nav[2]:
+        section_tech_pack_preview()
+    with nav[3]:
+        section_fitting_notes()
+    with nav[4]:
+        section_send_to_factory()
+    with nav[5]:
+        section_wip_dashboard()
+
     st.divider()
     st.caption(
         "Demo only — outbound emails are routed to TEST_EMAIL_RECIPIENT, not real factories. "
