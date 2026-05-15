@@ -1,0 +1,99 @@
+{
+  "squad_name": "SpecBot Pitch Squad",
+  "members": [
+    {
+      "name": "Priya Nair",
+      "role": "Accountable",
+      "focus": "Squad lead / pitch owner",
+      "region": "United Kingdom",
+      "ooo": [
+        {
+          "type": "PTO",
+          "start": "2026-07-06",
+          "end": "2026-07-17",
+          "note": "Family summer holiday"
+        }
+      ]
+    },
+    {
+      "name": "Arthur Lévesque",
+      "role": "Responsible",
+      "focus": "Tech pack engine & GPT service",
+      "region": "Canada",
+      "ooo": [
+        {
+          "type": "PTO",
+          "start": "2026-08-10",
+          "end": "2026-08-21",
+          "note": "Two weeks off in August"
+        }
+      ]
+    },
+    {
+      "name": "Diego Marín",
+      "role": "Responsible",
+      "focus": "Demo UX & Streamlit build",
+      "region": "Spain",
+      "ooo": [
+        {
+          "type": "PTO",
+          "start": "2026-08-03",
+          "end": "2026-08-21",
+          "note": "August break"
+        }
+      ]
+    },
+    {
+      "name": "Tom Becker",
+      "role": "Responsible",
+      "focus": "Brand library & data ingest",
+      "region": "United States",
+      "ooo": [
+        {
+          "type": "PTO",
+          "start": "2026-07-06",
+          "end": "2026-07-10",
+          "note": "Lake house week"
+        }
+      ]
+    },
+    {
+      "name": "Mei Lin Tan",
+      "role": "Consulted",
+      "focus": "Technical design SME",
+      "region": "Singapore",
+      "ooo": [
+        {
+          "type": "Conference / travel",
+          "start": "2026-06-15",
+          "end": "2026-06-17",
+          "note": "Apparel sourcing summit"
+        }
+      ]
+    },
+    {
+      "name": "Sofia Rossi",
+      "role": "Informed",
+      "focus": "Customer sponsor / sales",
+      "region": "Italy",
+      "ooo": [
+        {
+          "type": "PTO",
+          "start": "2026-08-13",
+          "end": "2026-08-21",
+          "note": "Ferragosto week"
+        }
+      ]
+    }
+  ],
+  "holidays": [
+    { "name": "Victoria Day", "date": "2026-05-18", "region": "Canada" },
+    { "name": "Memorial Day", "date": "2026-05-25", "region": "United States" },
+    { "name": "St-Jean-Baptiste Day", "date": "2026-06-24", "region": "Canada" },
+    { "name": "Canada Day", "date": "2026-07-01", "region": "Canada" },
+    { "name": "Independence Day (observed)", "date": "2026-07-03", "region": "United States" },
+    { "name": "Singapore National Day (observed)", "date": "2026-08-10", "region": "Singapore" },
+    { "name": "Ferragosto", "date": "2026-08-15", "region": "Italy" },
+    { "name": "Summer Bank Holiday", "date": "2026-08-31", "region": "United Kingdom" }
+  ]
+}

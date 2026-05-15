@@ -25,6 +25,12 @@ below.
    recorded in the email body.
 6. **WIP dashboard** — the local dashboard updates to "Sent to Factory".
 
+The **Team & PTO** tab is a separate squad-coordination view: the pitch
+squad's RACI roles, each person's out-of-office dates, and region-matched
+public holidays, with a weeks-ahead availability outlook. It is JSON-backed
+(`team_roster.json`) and editable in-app; set `SPECBOT_TEAM_PATH` to point
+it at a Railway volume if you need it to survive redeploys.
+
 ## Setup
 
 ```bash
@@ -109,7 +115,9 @@ specbot/
   fit_update_service.py  Apply fitting notes -> updated tech pack + change log
   email_sender.py        Resend or SMTP transport, test-mode redirect
   wip_store.py           JSON-backed WIP dashboard
+  team_store.py          JSON-backed pitch-squad PTO / holiday tracker
   factory_contacts.json  5 demo factories with 2 contacts each
+  team_roster.json       Pitch squad: RACI roles, OOO dates, holidays
   wip_records.json       Created on first send
   requirements.txt
   .env.example

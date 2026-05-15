@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +42,15 @@ from mock_data import (
     SAMPLE_STAGES,
     build_graded_table,
     get_grounding_report,
+)
+from team_store import (
+    OOO_TYPES,
+    RACI_ROLES,
+    load_team,
+    member_status,
+    parse_date,
+    save_team,
+    upcoming_holidays,
 )
 from wip_store import add_or_update_wip_record, load_wip_records
 
@@ -1154,6 +1163,334 @@ def section_wip_dashboard() -> None:
     st.dataframe(df[columns], use_container_width=True, hide_index=True)
 
 
+# ---- Team & PTO ----------------------------------------------------------
+
+
+def _fmt_day(day: date) -> str:
+    return f"{day:%a %b} {day.day}"
+
+
+def _roster_df(team: dict[str, Any]) -> pd.DataFrame:
+    rows = [
+        {
+            "name": m.get("name", ""),
+            "raci": m.get("role", ""),
+            "focus": m.get("focus", ""),
+            "region": m.get("region", ""),
+        }
+        for m in team.get("members", [])
+    ]
+    if not rows:
+        return pd.DataFrame(columns=["name", "raci", "focus", "region"])
+    return pd.DataFrame(rows)
+
+
+def _ooo_df(team: dict[str, Any]) -> pd.DataFrame:
+    rows = []
+    for m in team.get("members", []):
+        for entry in m.get("ooo", []):
+            start = parse_date(entry.get("start"))
+            rows.append(
+                {
+                    "member": m.get("name", ""),
+                    "type": entry.get("type", "PTO"),
+                    "start": start,
+                    "end": parse_date(entry.get("end")) or start,
+                    "note": entry.get("note", ""),
+                }
+            )
+    cols = ["member", "type", "start", "end", "note"]
+    if not rows:
+        return pd.DataFrame(columns=cols)
+    return pd.DataFrame(rows).sort_values("start", na_position="last").reset_index(drop=True)
+
+
+def _team_outlook_banner(team: dict[str, Any]) -> None:
+    today = date.today()
+    holidays = team.get("holidays", [])
+    lines = []
+    for offset in range(8):
+        day = today + timedelta(days=offset)
+        outs = []
+        for m in team.get("members", []):
+            state, detail = member_status(m, day, holidays)
+            if state == "ooo":
+                outs.append(f"{m.get('name', '')} ({(detail or {}).get('type', 'PTO')})")
+            elif state == "holiday":
+                outs.append(
+                    f"{m.get('name', '')} — {(detail or {}).get('name', 'public holiday')}"
+                )
+        if outs:
+            lines.append(f"**{_fmt_day(day)}** — " + "; ".join(outs))
+    if lines:
+        st.warning("Out of office in the next 7 days:\n\n" + "\n\n".join(lines), icon="🌴")
+    else:
+        st.success("The whole squad is available for the next 7 days.", icon="✅")
+
+
+def _team_squad_tab(team: dict[str, Any]) -> None:
+    st.caption(
+        f"{LIVE_BADGE}. The pitch squad and each person's RACI role. "
+        "Edit cells, add or remove rows, then Save."
+    )
+    edited = st.data_editor(
+        _roster_df(team),
+        num_rows="dynamic",
+        use_container_width=True,
+        hide_index=True,
+        key="team_roster_editor",
+        column_config={
+            "name": st.column_config.TextColumn("Name", required=True),
+            "raci": st.column_config.SelectboxColumn("RACI", options=RACI_ROLES),
+            "focus": st.column_config.TextColumn("Focus area"),
+            "region": st.column_config.TextColumn(
+                "Region", help="Used to match public holidays to this person."
+            ),
+        },
+    )
+    if st.button("Save squad", key="save_roster_btn"):
+        existing = {
+            m.get("name", "").strip().lower(): m for m in team.get("members", [])
+        }
+        members = []
+        for _, row in edited.iterrows():
+            name = str(row.get("name", "") or "").strip()
+            if not name:
+                continue
+            prior = existing.get(name.lower(), {})
+            members.append(
+                {
+                    "name": name,
+                    "role": str(row.get("raci", "") or ""),
+                    "focus": str(row.get("focus", "") or ""),
+                    "region": str(row.get("region", "") or ""),
+                    "ooo": prior.get("ooo", []),
+                }
+            )
+        team["members"] = members
+        save_team(team)
+        st.success(f"Saved {len(members)} squad member(s).")
+
+    accountable = [
+        m.get("name", "")
+        for m in team.get("members", [])
+        if (m.get("role") or "") == "Accountable"
+    ]
+    if len(accountable) == 0:
+        st.warning("No one is marked **Accountable** — RACI expects exactly one.")
+    elif len(accountable) > 1:
+        st.warning(
+            f"{len(accountable)} people are marked **Accountable** "
+            f"({', '.join(accountable)}). RACI expects exactly one."
+        )
+
+
+def _team_timeoff_tab(team: dict[str, Any]) -> None:
+    members = team.get("members", [])
+    if not members:
+        st.info("Add squad members on the Squad tab first.", icon="ℹ️")
+        return
+    st.caption(
+        f"{LIVE_BADGE}. The key tab — everyone's out-of-office dates. "
+        "Add a row, pick your name, set the dates, then Save."
+    )
+    names = [m.get("name", "") for m in members]
+    edited = st.data_editor(
+        _ooo_df(team),
+        num_rows="dynamic",
+        use_container_width=True,
+        hide_index=True,
+        key="team_ooo_editor",
+        column_config={
+            "member": st.column_config.SelectboxColumn(
+                "Member", options=names, required=True
+            ),
+            "type": st.column_config.SelectboxColumn("Type", options=OOO_TYPES),
+            "start": st.column_config.DateColumn("First day out", format="YYYY-MM-DD"),
+            "end": st.column_config.DateColumn("Last day out", format="YYYY-MM-DD"),
+            "note": st.column_config.TextColumn("Note"),
+        },
+    )
+    if st.button("Save time off", key="save_ooo_btn"):
+        by_name: dict[str, list[dict[str, Any]]] = {n: [] for n in names}
+        skipped = 0
+        for _, row in edited.iterrows():
+            member = str(row.get("member", "") or "").strip()
+            start = parse_date(row.get("start"))
+            if member not in by_name or start is None:
+                skipped += 1
+                continue
+            end = parse_date(row.get("end")) or start
+            if end < start:
+                start, end = end, start
+            by_name[member].append(
+                {
+                    "type": str(row.get("type", "") or "PTO"),
+                    "start": start.isoformat(),
+                    "end": end.isoformat(),
+                    "note": str(row.get("note", "") or "").strip(),
+                }
+            )
+        for m in members:
+            m["ooo"] = sorted(
+                by_name.get(m.get("name", ""), []), key=lambda e: e["start"]
+            )
+        save_team(team)
+        msg = "Time off saved."
+        if skipped:
+            msg += f" {skipped} row(s) skipped (missing member or start date)."
+        st.success(msg)
+
+
+def _team_availability_tab(team: dict[str, Any]) -> None:
+    members = team.get("members", [])
+    if not members:
+        st.info("Add squad members on the Squad tab first.", icon="ℹ️")
+        return
+    st.caption(
+        f"{LIVE_BADGE}. Working-day coverage for the weeks ahead — "
+        "summer is when pitch squads lose the most time."
+    )
+    holidays = team.get("holidays", [])
+    weeks = st.slider("Weeks to look ahead", 4, 16, 10, key="team_weeks_slider")
+    today = date.today()
+    monday = today - timedelta(days=today.weekday())
+    week_starts = [monday + timedelta(weeks=w) for w in range(weeks)]
+
+    grid: dict[str, dict[str, int]] = {}
+    for m in members:
+        row: dict[str, int] = {}
+        for ws in week_starts:
+            days_out = 0
+            for d in range(5):  # Mon–Fri
+                state, _ = member_status(m, ws + timedelta(days=d), holidays)
+                if state != "available":
+                    days_out += 1
+            row[f"{ws:%b} {ws.day}"] = days_out
+        grid[m.get("name", "")] = row
+
+    df = pd.DataFrame.from_dict(grid, orient="index")
+    df.index.name = "Member"
+
+    def _shade(value: int) -> str:
+        if value >= 4:
+            return "background-color: rgba(239, 68, 68, 0.55)"
+        if value >= 2:
+            return "background-color: rgba(245, 158, 11, 0.45)"
+        if value >= 1:
+            return "background-color: rgba(245, 158, 11, 0.20)"
+        return ""
+
+    styled = df.style.map(_shade).format(lambda v: "" if v == 0 else f"{v}d")
+    st.dataframe(styled, use_container_width=True)
+    st.caption(
+        "Each cell is working days out that week (Mon–Fri). "
+        "Amber = partial loss, red = whole week gone."
+    )
+
+    headcount = len(members)
+    thin = []
+    for ws in week_starts:
+        col = f"{ws:%b} {ws.day}"
+        mostly_out = sum(1 for name in grid if grid[name][col] >= 3)
+        if mostly_out and mostly_out >= max(1, headcount // 2):
+            thin.append(f"week of {col}: {mostly_out} of {headcount} mostly out")
+    if thin:
+        st.warning(
+            "Thin-coverage weeks — plan pitch milestones around these:\n\n"
+            + "\n\n".join(f"- {t}" for t in thin),
+            icon="⚠️",
+        )
+
+
+def _team_holidays_tab(team: dict[str, Any]) -> None:
+    st.caption(
+        f"{LIVE_BADGE}. Public holidays the squad observes. Matched to people by "
+        "Region (or `All`), so they don't have to be entered per person."
+    )
+    rows = [
+        {
+            "name": h.get("name", ""),
+            "date": parse_date(h.get("date")),
+            "region": h.get("region", ""),
+        }
+        for h in team.get("holidays", [])
+    ]
+    df = pd.DataFrame(rows, columns=["name", "date", "region"])
+    if not df.empty:
+        df = df.sort_values("date", na_position="last").reset_index(drop=True)
+    edited = st.data_editor(
+        df,
+        num_rows="dynamic",
+        use_container_width=True,
+        hide_index=True,
+        key="team_holidays_editor",
+        column_config={
+            "name": st.column_config.TextColumn("Holiday", required=True),
+            "date": st.column_config.DateColumn("Date", format="YYYY-MM-DD"),
+            "region": st.column_config.TextColumn(
+                "Region", help="Match a member's Region, or use `All` for everyone."
+            ),
+        },
+    )
+    if st.button("Save holidays", key="save_holidays_btn"):
+        holidays = []
+        for _, row in edited.iterrows():
+            name = str(row.get("name", "") or "").strip()
+            when = parse_date(row.get("date"))
+            if not name or when is None:
+                continue
+            holidays.append(
+                {
+                    "name": name,
+                    "date": when.isoformat(),
+                    "region": str(row.get("region", "") or "").strip(),
+                }
+            )
+        holidays.sort(key=lambda h: h["date"])
+        team["holidays"] = holidays
+        save_team(team)
+        st.success(f"Saved {len(holidays)} holiday(s).")
+
+    soon = upcoming_holidays(team, today=date.today(), within_days=150)
+    if soon:
+        st.markdown("**Coming up**")
+        for h in soon:
+            days_away = (h["_date"] - date.today()).days
+            when = "today" if days_away == 0 else f"in {days_away} day(s)"
+            st.markdown(
+                f"- **{_fmt_day(h['_date'])}** — {h.get('name', '')} "
+                f"({h.get('region', '') or 'All'}, {when})"
+            )
+
+
+def section_team_tracker() -> None:
+    team = load_team()
+    squad_name = team.get("squad_name") or "Pitch Squad"
+    st.markdown(
+        f"Keep the **{squad_name}** in sync — RACI roles, PTO, and public "
+        "holidays in one place so milestones land when people are actually around."
+    )
+    _team_outlook_banner(team)
+
+    tabs = st.tabs(
+        [
+            f"Squad & RACI  {LIVE_BADGE}",
+            f"Time Off  {LIVE_BADGE}",
+            f"Availability  {LIVE_BADGE}",
+            f"Holidays  {LIVE_BADGE}",
+        ]
+    )
+    with tabs[0]:
+        _team_squad_tab(team)
+    with tabs[1]:
+        _team_timeoff_tab(team)
+    with tabs[2]:
+        _team_availability_tab(team)
+    with tabs[3]:
+        _team_holidays_tab(team)
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -1179,6 +1516,7 @@ def main() -> None:
             "Fitting",
             "Send to Factory",
             "WIP Dashboard",
+            "Team & PTO",
         ]
     )
     with nav[0]:
@@ -1193,6 +1531,8 @@ def main() -> None:
         section_send_to_factory()
     with nav[5]:
         section_wip_dashboard()
+    with nav[6]:
+        section_team_tracker()
 
     st.divider()
     st.caption(

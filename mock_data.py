@@ -606,6 +606,7 @@ FEATURE_ROADMAP: list[dict[str, str]] = [
     {"feature": "Sample stage tracking", "status": "live"},
     {"feature": "Send to factory (test mode)", "status": "live"},
     {"feature": "WIP dashboard", "status": "live"},
+    {"feature": "Team PTO / holiday tracker", "status": "live"},
     {"feature": "ISO 4915 / 4916 stitch & seam codes", "status": "live"},
     {"feature": "Grading across full size run", "status": "preview"},
     {"feature": "Costing rollup → target FOB", "status": "preview"},
