@@ -402,6 +402,20 @@ def _persist_current_tech_pack() -> None:
         pass
 
 
+def _attach_sketch_to_tech_pack(tp: dict[str, Any]) -> None:
+    """Persist the working sketch on the tech pack so it survives reloads."""
+    data = st.session_state.get("uploaded_sketch_bytes")
+    if data:
+        tp["sketch_b64"] = _b64(data)
+        tp["sketch_mime"] = st.session_state.get("uploaded_sketch_mime") or "image/png"
+
+
+def _restore_sketch_from_tech_pack(tp: dict[str, Any]) -> None:
+    data = _from_b64(tp.get("sketch_b64") or "")
+    st.session_state.uploaded_sketch_bytes = data or None
+    st.session_state.uploaded_sketch_mime = tp.get("sketch_mime") if data else None
+
+
 def _push_undo_snapshot() -> None:
     """Push the current tech pack onto the undo stack (max 20) and clear redo."""
     stack = st.session_state.setdefault("undo_stack", [])
@@ -592,8 +606,8 @@ def _render_saved_styles(key_prefix: str = "sidebar") -> None:
             if loaded:
                 st.session_state.tech_pack = {**_empty_tech_pack(), **loaded}
                 st.session_state.export_path = None
-                st.session_state.uploaded_sketch_bytes = None
-                st.session_state.uploaded_sketch_mime = None
+                st.session_state.undo_stack, st.session_state.redo_stack = [], []
+                _restore_sketch_from_tech_pack(st.session_state.tech_pack)
                 _flash("success", f"Loaded {target['style_number']} — continue where you left off.")
                 _go("techpack")
             else:
@@ -919,6 +933,7 @@ def _load_demo_tech_pack() -> None:
     analysis = build_offline_draft(metadata)
     st.session_state.tech_pack = _to_tech_pack(analysis, metadata)
     st.session_state.export_path = None
+    st.session_state.undo_stack, st.session_state.redo_stack = [], []
     st.session_state.uploaded_sketch_bytes = None
     st.session_state.uploaded_sketch_mime = None
 
@@ -1018,8 +1033,8 @@ def _render_style_archive() -> None:
             if loaded:
                 st.session_state.tech_pack = {**_empty_tech_pack(), **loaded}
                 st.session_state.export_path = None
-                st.session_state.uploaded_sketch_bytes = None
-                st.session_state.uploaded_sketch_mime = None
+                st.session_state.undo_stack, st.session_state.redo_stack = [], []
+                _restore_sketch_from_tech_pack(st.session_state.tech_pack)
                 _flash("success", f"Opened {s['style_number']} — continue where you left off.")
                 _go("techpack")
             else:
@@ -1048,6 +1063,8 @@ def _render_style_archive() -> None:
                 )
                 st.session_state.tech_pack = {**_empty_tech_pack(), **dup}
                 st.session_state.export_path = None
+                st.session_state.undo_stack, st.session_state.redo_stack = [], []
+                _restore_sketch_from_tech_pack(st.session_state.tech_pack)
                 _persist_current_tech_pack()
                 _flash("success", f"Duplicated {s['style_number']} as {new_number}.")
                 _go("techpack")
@@ -1172,6 +1189,8 @@ def _render_new_style_form() -> None:
     if not os.getenv("OPENAI_API_KEY"):
         analysis = build_offline_draft(metadata)
         st.session_state.tech_pack = _to_tech_pack(analysis, metadata)
+        _attach_sketch_to_tech_pack(st.session_state.tech_pack)
+        st.session_state.undo_stack, st.session_state.redo_stack = [], []
         st.session_state.export_path = None
         _flash(
             "warning",
@@ -1210,7 +1229,9 @@ def _render_new_style_form() -> None:
 
     analysis["grounding_report"] = report
     tech_pack = _to_tech_pack(analysis, metadata)
+    _attach_sketch_to_tech_pack(tech_pack)
     st.session_state.tech_pack = tech_pack
+    st.session_state.undo_stack, st.session_state.redo_stack = [], []
     st.session_state.export_path = None
     try:
         save_tech_pack(tech_pack)
@@ -1244,6 +1265,14 @@ def _tab_overview(tech_pack: dict[str, Any]) -> None:
             st.caption("PDF uploaded — preview not rendered.")
         else:
             st.caption("No sketch uploaded.")
+
+        st.markdown("**POM diagram**")
+        try:
+            from spec_diagram import render_spec_diagram
+
+            st.image(render_spec_diagram(tech_pack), use_container_width=True)
+        except Exception as exc:  # noqa: BLE001
+            st.caption(f"Diagram unavailable: {exc}")
 
     st.divider()
     _render_grounding_card(tech_pack)
@@ -1320,6 +1349,13 @@ def _log_manual_measurement_edits(
 
 def _tab_measurements(tech_pack: dict[str, Any]) -> None:
     _render_undo_controls("meas")
+    with st.expander("POM diagram — numbers match the table rows", expanded=True):
+        try:
+            from spec_diagram import render_spec_diagram
+
+            st.image(render_spec_diagram(tech_pack), width=560)
+        except Exception as exc:  # noqa: BLE001
+            st.caption(f"Diagram unavailable: {exc}")
     st.caption(
         f"{LIVE_BADGE}. Editable — every manual change is recorded in the change log. "
         "Source values control whether a row is AI-derived, inferred, a placeholder "
@@ -1714,6 +1750,7 @@ def section_tech_pack_preview() -> None:
             try:
                 path = export_tech_pack_to_excel(
                     tech_pack, sketch_bytes=st.session_state.get("uploaded_sketch_bytes")
+                    or _from_b64(tech_pack.get("sketch_b64") or "")
                 )
             except Exception as exc:  # noqa: BLE001
                 st.error(f"Excel export failed: {exc}")
@@ -2239,6 +2276,7 @@ def section_send_to_factory() -> None:
                 try:
                     attachment = export_tech_pack_to_excel(
                         tech_pack, sketch_bytes=st.session_state.get("uploaded_sketch_bytes")
+                    or _from_b64(tech_pack.get("sketch_b64") or "")
                     )
                     st.session_state.export_path = attachment
                 except Exception as exc:  # noqa: BLE001

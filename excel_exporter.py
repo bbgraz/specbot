@@ -166,6 +166,20 @@ def export_tech_pack_to_excel(
         rows_for_size.append(row_values)
     _autosize(meas_sheet, meas_headers, rows_for_size)
     meas_sheet.freeze_panes(data_start, 0)
+    try:
+        import io
+
+        from spec_diagram import render_spec_diagram
+
+        diagram_png = render_spec_diagram(tech_pack)
+        meas_sheet.insert_image(
+            4,
+            len(meas_headers) + 1,
+            "pom_diagram.png",
+            {"image_data": io.BytesIO(diagram_png), "x_scale": 0.62, "y_scale": 0.62},
+        )
+    except Exception:  # noqa: BLE001 - the diagram must never block an export
+        pass
 
     # 3. BOM
     bom_sheet = workbook.add_worksheet("BOM")

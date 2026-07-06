@@ -542,6 +542,50 @@ def t_ui_revise_table_present():
     assert at.text_input(key="revise_reason_input").value, "reason field should be prefilled"
 check("UI: Revise Table worksheet renders on Fit & Revise", t_ui_revise_table_present)
 
+def t_spec_diagram():
+    from spec_diagram import render_spec_diagram
+    from spec_blocks import build_offline_draft
+    import io
+    from PIL import Image
+    for gt in ("crewneck tee", "zip hoodie", "chino pant", "wrap skirt", "midi dress"):
+        meta = {"style_number": "T", "style_name": "X", "garment_type": gt, "sample_size": "M"}
+        d = build_offline_draft(meta)
+        png = render_spec_diagram({**meta, "measurements": d["suggested_measurements"]})
+        img = Image.open(io.BytesIO(png))
+        assert img.width == 1000 and img.height > 900 and len(png) > 10_000, gt
+check("Spec diagram renders for all garment categories", t_spec_diagram)
+
+def t_excel_diagram_embedded():
+    from excel_exporter import export_tech_pack_to_excel
+    path = export_tech_pack_to_excel(copy.deepcopy(SAMPLE_TP))
+    from openpyxl import load_workbook
+    wb = load_workbook(path)
+    assert len(wb["Measurements"]._images) == 1, "POM diagram must be on the Measurements sheet"
+check("Excel: POM diagram embedded on Measurements sheet", t_excel_diagram_embedded)
+
+def t_sketch_persists_with_pack():
+    from streamlit.testing.v1 import AppTest
+    import tech_pack_store
+    from PIL import Image
+    import io as _io
+    # save a pack with a sketch, then open from archive in a fresh session
+    img = Image.new("RGB", (300, 200), "white")
+    buf = _io.BytesIO(); img.save(buf, format="PNG")
+    tp = copy.deepcopy(SAMPLE_TP)
+    import base64
+    tp["sketch_b64"] = base64.b64encode(buf.getvalue()).decode("ascii")
+    tp["sketch_mime"] = "image/png"
+    tech_pack_store.save_tech_pack(tp)
+    at = AppTest.from_file(str(APP_DIR / "app.py"), default_timeout=60)
+    at.run()
+    idx = next(i for i, s in enumerate(tech_pack_store.list_tech_packs())
+               if s["style_number"] == "TST-001")
+    at.button(key=f"arch_open_{idx}").click().run()
+    assert len(at.exception) == 0
+    assert at.session_state["uploaded_sketch_bytes"], "sketch must be restored from the saved pack"
+    tech_pack_store.delete_tech_pack("TST-001")
+check("Sketch persists with the tech pack and restores on archive open", t_sketch_persists_with_pack)
+
 def t_ui_undo_redo_reset():
     from streamlit.testing.v1 import AppTest
     at = AppTest.from_file(str(APP_DIR / "app.py"), default_timeout=60)
