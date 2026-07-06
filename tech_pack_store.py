@@ -79,6 +79,7 @@ def list_tech_packs() -> list[dict[str, Any]]:
                 "style_name": data.get("style_name", ""),
                 "garment_type": data.get("garment_type", ""),
                 "sample_stage": data.get("sample_stage", ""),
+                "rev": data.get("rev", 0),
                 "saved_at": data.get("_saved_at", ""),
                 "path": str(path),
             }

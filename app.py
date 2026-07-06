@@ -290,7 +290,7 @@ def _from_b64(s: str) -> bytes:
 # ---------------------------------------------------------------------------
 
 WORKFLOW_STAGES: list[tuple[str, str]] = [
-    ("intake", "① Style Intake"),
+    ("intake", "① Styles"),
     ("techpack", "② Tech Pack"),
     ("fit", "③ Fit & Revise"),
     ("send", "④ Send to Factory"),
@@ -451,6 +451,11 @@ def _init_state() -> None:
         st.session_state[k] = st.session_state.get(k, "")
     st.session_state.form_sample_stage = st.session_state.get("form_sample_stage", DEFAULT_STAGE)
     st.session_state.camera_enable = st.session_state.get("camera_enable", False)
+    # Keep-alive for stage-local widgets whose state must survive navigating
+    # to another stage (Streamlit drops widget keys that don't render).
+    for _k in ("grading_size_run", "fitting_stage_select", "use_fitting_draft"):
+        if _k in st.session_state:
+            st.session_state[_k] = st.session_state[_k]
     # Apply queued navigation BEFORE the nav widget is instantiated.
     if st.session_state.get("_pending_nav"):
         st.session_state.nav_stage = st.session_state.pop("_pending_nav")
@@ -526,7 +531,7 @@ def sidebar() -> None:
                 f"{tech_pack.get('garment_type') or '—'} · size {tech_pack.get('sample_size') or '—'}"
             )
         else:
-            st.caption("No style loaded — start at ① Style Intake.")
+            st.caption("No style loaded — start at ① Styles.")
 
         st.divider()
         _sidebar_saved_styles()
@@ -890,7 +895,88 @@ class _MemorySketch:
         return self._data
 
 
+def _render_style_archive() -> None:
+    """First-class archive of every generated tech pack — open, duplicate, delete."""
+    saved = list_tech_packs()
+    if not saved:
+        st.info(
+            "No saved tech packs yet. Every generated style is auto-saved here — "
+            "start one in the **New Style** tab."
+        )
+        return
+
+    st.caption(
+        "Every tech pack is auto-saved as you work. **Open** one to continue exactly "
+        "where you left off — measurements, fit history, change log, everything."
+    )
+    header = st.columns([2, 3, 2, 1.2, 1, 2, 1.2, 1.4, 1.2])
+    for col, title in zip(header, ["Style #", "Name", "Type", "Stage", "Rev", "Last saved", "", "", ""]):
+        col.markdown(f"**{title}**" if title else "")
+    for i, s in enumerate(saved):
+        cols = st.columns([2, 3, 2, 1.2, 1, 2, 1.2, 1.4, 1.2])
+        cols[0].markdown(s.get("style_number") or "—")
+        cols[1].markdown(s.get("style_name") or "—")
+        cols[2].markdown(s.get("garment_type") or "—")
+        cols[3].markdown(s.get("sample_stage") or "—")
+        cols[4].markdown(str(s.get("rev", 0)))
+        cols[5].caption(s.get("saved_at") or "—")
+        if cols[6].button("Open", key=f"arch_open_{i}", type="primary"):
+            loaded = load_tech_pack(s["style_number"])
+            if loaded:
+                st.session_state.tech_pack = {**_empty_tech_pack(), **loaded}
+                st.session_state.export_path = None
+                st.session_state.uploaded_sketch_bytes = None
+                st.session_state.uploaded_sketch_mime = None
+                _flash("success", f"Opened {s['style_number']} — continue where you left off.")
+                _go("techpack")
+            else:
+                st.error("Could not load that tech pack.")
+        if cols[7].button("Duplicate", key=f"arch_dup_{i}"):
+            loaded = load_tech_pack(s["style_number"])
+            if loaded:
+                dup = copy.deepcopy(loaded)
+                existing = {r.get("style_number") for r in list_tech_packs()}
+                base = f"{s['style_number']}-COPY"
+                new_number, n = base, 2
+                while new_number in existing:
+                    new_number, n = f"{base}{n}", n + 1
+                dup["style_number"] = new_number
+                dup.pop("_saved_at", None)
+                dup.setdefault("change_log", []).append(
+                    {
+                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "stage": dup.get("sample_stage", DEFAULT_STAGE),
+                        "pom": "(style)",
+                        "field": "style_number",
+                        "old_value": s["style_number"],
+                        "new_value": new_number,
+                        "reason": f"Duplicated from {s['style_number']}",
+                    }
+                )
+                st.session_state.tech_pack = {**_empty_tech_pack(), **dup}
+                st.session_state.export_path = None
+                _persist_current_tech_pack()
+                _flash("success", f"Duplicated {s['style_number']} as {new_number}.")
+                _go("techpack")
+            else:
+                st.error("Could not load that tech pack.")
+        if cols[8].button("Delete", key=f"arch_del_{i}"):
+            if delete_tech_pack(s["style_number"]):
+                st.rerun()
+            else:
+                st.error("Delete failed.")
+
+
 def section_style_setup() -> None:
+    saved_count = len(list_tech_packs())
+    tab_new, tab_archive = st.tabs(["Start New Style", f"Style Archive ({saved_count})"])
+    with tab_archive:
+        _render_style_archive()
+    with tab_new:
+        _render_new_style_form()
+
+
+def _render_new_style_form() -> None:
     st.markdown(
         "Drop a sketch, add the style basics, generate — you'll land on the "
         "**② Tech Pack** stage to review and edit the draft."
@@ -900,9 +986,6 @@ def section_style_setup() -> None:
             "⚠️ No OPENAI_API_KEY set — generation runs offline from the "
             "category-standard spec block (sketch won't be analyzed)."
         )
-
-    with st.expander("Resume a saved style"):
-        _render_saved_styles("intake")
     with st.form("style_setup_form", clear_on_submit=False):
         upload = st.file_uploader(
             "Upload sketch (PDF, JPG, PNG)",
@@ -2029,9 +2112,9 @@ def main() -> None:
     if stage in ("techpack", "fit", "send") and not has_style:
         st.info(
             f"**{_STAGE_LABELS[stage]}** needs a style in progress. "
-            "Start at Style Intake — generate from a sketch, or load the demo style."
+            "Start at ① Styles — open a saved tech pack from the archive, or generate a new style."
         )
-        if st.button("← Go to Style Intake", key="goto_intake_btn"):
+        if st.button("← Go to ① Styles", key="goto_intake_btn"):
             _go("intake")
         return
 

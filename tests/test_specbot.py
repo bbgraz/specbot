@@ -495,7 +495,7 @@ def t_ui_workflow_navigation():
         assert btn.disabled, f"{stage} should be disabled with no style"
         btn.click().run()
         assert len(at.exception) == 0
-        assert any("Style Intake" in str(i.value) for i in at.info), f"{stage} should be gated"
+        assert any("① Styles" in str(i.value) for i in at.info), f"{stage} should be gated"
     # ungated stages render without a style
     for stage in ("wip", "library"):
         [b for b in at.button if b.key == f"nav_btn_{stage}"][0].click().run()
@@ -510,6 +510,30 @@ def t_ui_workflow_navigation():
     at.button(key="nav_btn_techpack").click().run()
     assert at.session_state["nav_stage"] == "techpack", "stepper forward works after back"
 check("UI: stepper nav — gating, back/forward navigation, all stages render", t_ui_workflow_navigation)
+
+def t_ui_style_archive():
+    from streamlit.testing.v1 import AppTest
+    at = AppTest.from_file(str(APP_DIR / "app.py"), default_timeout=60)
+    at.run()
+    # create a saved style, then reset the session (fresh day, old tech pack on disk)
+    [b for b in at.button if "Demo" in (b.label or "")][0].click().run()
+    at2 = AppTest.from_file(str(APP_DIR / "app.py"), default_timeout=60)
+    at2.run()
+    assert not at2.session_state["tech_pack"]["style_number"], "fresh session, no style"
+    open_btns = [b for b in at2.button if b.key == "arch_open_0"]
+    assert open_btns, "archive Open button should be on ① Styles"
+    open_btns[0].click().run()
+    assert len(at2.exception) == 0
+    assert at2.session_state["nav_stage"] == "techpack"
+    assert at2.session_state["tech_pack"]["style_number"] == "TST-001", "old pack opened for editing"
+    # duplicate creates a -COPY with an audit entry
+    at2.button(key="nav_btn_intake").click().run()
+    [b for b in at2.button if b.key == "arch_dup_0"][0].click().run()
+    assert len(at2.exception) == 0
+    tp = at2.session_state["tech_pack"]
+    assert tp["style_number"].startswith("TST-001-COPY")
+    assert any("Duplicated from TST-001" in e.get("reason", "") for e in tp["change_log"])
+check("UI: archive — open old tech pack for editing, duplicate with audit entry", t_ui_style_archive)
 
 def t_ui_preview_apply_flow():
     from streamlit.testing.v1 import AppTest
