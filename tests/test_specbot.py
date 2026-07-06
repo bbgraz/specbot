@@ -460,6 +460,27 @@ def t_description_offline_and_ui():
         "offline draft must flag that the description was not analyzed"
 check("UI: description captured on tech pack; offline draft flags it honestly", t_description_offline_and_ui)
 
+def t_manual_edit_audit_trail():
+    import app as app_module
+    tp = copy.deepcopy(SAMPLE_TP)
+    tp["sample_stage"] = "Fit 1"
+    old = copy.deepcopy(tp["measurements"])
+    new = copy.deepcopy(old)
+    new[0]["target"] = "21.5"          # edit Chest Width
+    new.pop(2)                          # delete Sleeve Length
+    new.append({"pom": "Back Neck Drop", "description": "", "target": "1",
+                "tolerance_plus": "0.125", "tolerance_minus": "0.125",
+                "source": "manual_edit", "notes": ""})
+    logged = app_module._log_manual_measurement_edits(tp, old, new)
+    assert logged == 3, logged
+    reasons = [e["reason"] for e in tp["change_log"]]
+    assert any("Manual edit (Measurements tab)" in r for r in reasons)
+    assert any("row added" in r for r in reasons) and any("row deleted" in r for r in reasons)
+    edit = next(e for e in tp["change_log"] if e["pom"] == "Chest Width")
+    assert edit["old_value"] == "21" and edit["new_value"] == "21.5"
+    assert all(e.get("stage") == "Fit 1" for e in tp["change_log"])
+check("Manual measurement edits are change-logged (edit/add/delete, stage stamped)", t_manual_edit_audit_trail)
+
 def t_ui_workflow_navigation():
     from streamlit.testing.v1 import AppTest
     at = AppTest.from_file(str(APP_DIR / "app.py"), default_timeout=60)

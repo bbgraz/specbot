@@ -1022,10 +1022,54 @@ def _render_grounding_card(tech_pack: dict[str, Any]) -> None:
             st.markdown(f"**Fit-history signal**\n\n{report['fit_history_signal']}")
 
 
+def _log_manual_measurement_edits(
+    tech_pack: dict[str, Any],
+    old_rows: list[dict[str, Any]],
+    new_rows: list[dict[str, Any]],
+) -> int:
+    """Change-log every manual measurement edit — no silent spec changes."""
+    from fit_update_service import _add_change_log
+
+    stage = tech_pack.get("sample_stage", DEFAULT_STAGE)
+    old_by = {r.get("pom", ""): r for r in old_rows if r.get("pom")}
+    new_by = {r.get("pom", ""): r for r in new_rows if r.get("pom")}
+    fields = ["target", "tolerance_plus", "tolerance_minus", "description", "notes", "source"]
+    count = 0
+    for pom, new_r in new_by.items():
+        old_r = old_by.get(pom)
+        if old_r is None:
+            _add_change_log(
+                tech_pack, pom, "row", "(none)",
+                f"target={new_r.get('target', '')}", "Manual edit — row added",
+            )
+            count += 1
+            continue
+        for field in fields:
+            if str(old_r.get(field, "")) != str(new_r.get(field, "")):
+                _add_change_log(
+                    tech_pack, pom, field,
+                    str(old_r.get(field, "")), str(new_r.get(field, "")),
+                    "Manual edit (Measurements tab)",
+                )
+                count += 1
+    for pom, old_r in old_by.items():
+        if pom not in new_by:
+            _add_change_log(
+                tech_pack, pom, "row",
+                f"target={old_r.get('target', '')}", "(deleted)", "Manual edit — row deleted",
+            )
+            count += 1
+    if count:
+        for entry in tech_pack.get("change_log", [])[-count:]:
+            entry.setdefault("stage", stage)
+    return count
+
+
 def _tab_measurements(tech_pack: dict[str, Any]) -> None:
     st.caption(
-        f"{LIVE_BADGE}. Editable. Source values control whether a row is AI-derived, "
-        "inferred, a placeholder for review, or a fitting-session update."
+        f"{LIVE_BADGE}. Editable — every manual change is recorded in the change log. "
+        "Source values control whether a row is AI-derived, inferred, a placeholder "
+        "for review, or a fitting-session update."
     )
     edited = st.data_editor(
         _measurements_df(tech_pack),
@@ -1041,14 +1085,19 @@ def _tab_measurements(tech_pack: dict[str, Any]) -> None:
                     "inferred_from_standard_practice",
                     "placeholder_for_review",
                     "fitting_note",
+                    "manual_edit",
                 ],
             )
         },
     )
     new_rows = _df_to_measurements(edited)
-    if new_rows != tech_pack.get("measurements"):
+    old_rows = tech_pack.get("measurements") or []
+    if new_rows != old_rows:
+        logged = _log_manual_measurement_edits(tech_pack, old_rows, new_rows)
         tech_pack["measurements"] = new_rows
         _persist_current_tech_pack()
+        if logged:
+            st.toast(f"{logged} manual change(s) recorded in the change log.")
 
 
 def _tab_grading(tech_pack: dict[str, Any]) -> None:
@@ -1679,6 +1728,10 @@ def _render_paste_notes_tab(tech_pack: dict[str, Any]) -> None:
     st.dataframe(_change_log_df(tech_pack), use_container_width=True, hide_index=True)
 
     st.subheader("Revised measurements")
+    st.caption(
+        "Read-only view. To hand-correct an individual POM, edit it in "
+        "**② Tech Pack → Measurements** — every manual change is change-logged."
+    )
     st.dataframe(_measurements_df(tech_pack), use_container_width=True, hide_index=True)
 
 
