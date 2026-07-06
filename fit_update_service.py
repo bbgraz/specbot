@@ -354,6 +354,20 @@ def _apply_update(tech_pack: dict[str, Any], update: dict[str, Any]) -> None:
         )
 
 
+def apply_structured_updates(
+    tech_pack: dict[str, Any], updates: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Apply already-structured POM updates (e.g. from the revision worksheet).
+
+    Same engine as fitting notes — change-logged, plausibility-capped deltas,
+    new rows for unknown POMs — but skips text parsing entirely.
+    """
+    revised = copy.deepcopy(tech_pack)
+    for update in updates:
+        _apply_update(revised, update)
+    return revised
+
+
 def apply_fitting_notes(
     tech_pack: dict[str, Any], fitting_notes: str
 ) -> dict[str, Any]:

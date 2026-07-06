@@ -1835,6 +1835,124 @@ def _render_paste_notes_tab(tech_pack: dict[str, Any]) -> None:
                 "n_old": len(tech_pack.get("change_log", [])),
             }
 
+
+def _render_revise_table_tab(tech_pack: dict[str, Any]) -> None:
+    """Direct revision worksheet — no math, no notes. Type either the new
+    target or a +/- delta per POM (fractions welcome) and preview."""
+    from fit_update_service import _parse_amount
+
+    st.caption(
+        f"{LIVE_BADGE}. Type the **New target** (e.g. `21.5` or `21 1/2`) *or* a "
+        "**Δ +/-** (e.g. `+1/4`, `-0.5`) for any POM — whichever you have in your "
+        "head. Tolerances are editable too. Then preview and apply."
+    )
+    measurements = tech_pack.get("measurements", []) or []
+    if not measurements:
+        st.info("No measurements yet — generate a tech pack first.")
+        return
+
+    cols = st.columns([3, 1])
+    with cols[1]:
+        current_stage = tech_pack.get("sample_stage", DEFAULT_STAGE)
+        try:
+            stage_idx = SAMPLE_STAGES.index(current_stage)
+        except ValueError:
+            stage_idx = 0
+        revise_stage = st.selectbox(
+            "Stage at fitting",
+            options=SAMPLE_STAGES,
+            index=stage_idx,
+            key="revise_stage_select",
+        )
+        reason_default = st.text_input(
+            "Reason (applies to all rows)",
+            value=f"{current_stage} fit revision",
+            key="revise_reason_input",
+        )
+
+    rows = [
+        {
+            "POM": m.get("pom", ""),
+            "Current": m.get("target", ""),
+            "New target": "",
+            "Δ +/-": "",
+            "Tol +": m.get("tolerance_plus", ""),
+            "Tol -": m.get("tolerance_minus", ""),
+        }
+        for m in measurements
+    ]
+    with cols[0]:
+        edited = st.data_editor(
+            pd.DataFrame(rows),
+            num_rows="fixed",
+            use_container_width=True,
+            hide_index=True,
+            key="revise_table_editor",
+            column_config={
+                "POM": st.column_config.TextColumn("POM", disabled=True),
+                "Current": st.column_config.TextColumn("Current", disabled=True),
+                "New target": st.column_config.TextColumn("New target"),
+                "Δ +/-": st.column_config.TextColumn("Δ +/-"),
+                "Tol +": st.column_config.TextColumn("Tol +"),
+                "Tol -": st.column_config.TextColumn("Tol -"),
+            },
+        )
+
+    if st.button("Preview Changes", key="revise_preview_btn", type="primary"):
+        updates: list[dict[str, Any]] = []
+        problems: list[str] = []
+        by_pom = {m.get("pom", ""): m for m in measurements}
+        for _, row in edited.iterrows():
+            pom = str(row.get("POM", "")).strip()
+            if not pom:
+                continue
+            current = by_pom.get(pom, {})
+            new_raw = str(row.get("New target", "") or "").strip()
+            delta_raw = str(row.get("Δ +/-", "") or "").strip()
+            tol_p = str(row.get("Tol +", "") or "").strip()
+            tol_m = str(row.get("Tol -", "") or "").strip()
+            update: dict[str, Any] = {
+                "pom": pom,
+                "new_target": None,
+                "delta": None,
+                "tolerance_plus": tol_p if tol_p != str(current.get("tolerance_plus", "")) else None,
+                "tolerance_minus": tol_m if tol_m != str(current.get("tolerance_minus", "")) else None,
+                "action": "update",
+                "reason": reason_default or "Direct revision (worksheet)",
+            }
+            if new_raw:
+                value = _parse_amount(new_raw)
+                if value is None:
+                    problems.append(f"{pom}: could not read new target “{new_raw}”")
+                    continue
+                update["new_target"] = f"{value:g}"
+            elif delta_raw:
+                value = _parse_amount(delta_raw)
+                if value is None:
+                    problems.append(f"{pom}: could not read delta “{delta_raw}”")
+                    continue
+                update["delta"] = f"{value:+g}"
+            elif update["tolerance_plus"] is None and update["tolerance_minus"] is None:
+                continue  # untouched row
+            updates.append(update)
+
+        for msg in problems:
+            st.warning(msg)
+        if not updates:
+            st.info("No revisions entered — type a new target or a Δ on at least one row.")
+        else:
+            from fit_update_service import apply_structured_updates
+
+            revised = apply_structured_updates(tech_pack, updates)
+            st.session_state.pending_fit = {
+                "revised": revised,
+                "stage": revise_stage,
+                "n_old": len(tech_pack.get("change_log", [])),
+            }
+
+
+def _render_pending_fit_preview(tech_pack: dict[str, Any]) -> None:
+    """Shared preview → Apply/Discard block for both revision paths."""
     pending = st.session_state.get("pending_fit")
     if pending:
         new_entries = pending["revised"].get("change_log", [])[pending["n_old"] :]
@@ -1843,6 +1961,7 @@ def _render_paste_notes_tab(tech_pack: dict[str, Any]) -> None:
         ]
         flagged = [e for e in new_entries if str(e.get("reason", "")).startswith("NOT APPLIED")]
 
+        st.divider()
         st.markdown("**Proposed changes — nothing is saved until you click Apply**")
         if applied:
             st.dataframe(
@@ -1851,9 +1970,9 @@ def _render_paste_notes_tab(tech_pack: dict[str, Any]) -> None:
                 hide_index=True,
             )
         else:
-            st.info("No applicable measurement changes were parsed from these notes.")
+            st.info("No applicable measurement changes were found.")
         if flagged:
-            st.warning(f"{len(flagged)} note(s) could not be applied — review manually:")
+            st.warning(f"{len(flagged)} change(s) could not be applied — review manually:")
             for e in flagged:
                 st.markdown(f"- {e.get('reason', '')}")
 
@@ -1882,8 +2001,8 @@ def _render_paste_notes_tab(tech_pack: dict[str, Any]) -> None:
 
     st.subheader("Revised measurements")
     st.caption(
-        "Read-only view. To hand-correct an individual POM, edit it in "
-        "**② Tech Pack → Measurements** — every manual change is change-logged."
+        "Read-only view. Revise via the worksheet or notes above, or hand-edit in "
+        "**② Tech Pack → Measurements** — every change is change-logged."
     )
     st.dataframe(_measurements_df(tech_pack), use_container_width=True, hide_index=True)
 
@@ -1895,14 +2014,25 @@ def section_fitting_notes() -> None:
         return
 
     st.markdown(
-        "Bring fit-session results back into the spec. **Paste Notes** is the everyday "
-        "path; the **Fitting Room** handles a full session transcript with photos."
+        "Bring fit results into the spec, three ways: **Revise Table** for direct "
+        "entry (no math — type the new number or the delta), **Paste Notes** for "
+        "freeform fit comments, **Fitting Room** for a full session transcript."
     )
-    tabs = st.tabs([f"Paste Notes  {LIVE_BADGE}", f"Fitting Room  {LIVE_BADGE}"])
+    tabs = st.tabs(
+        [
+            f"Revise Table  {LIVE_BADGE}",
+            f"Paste Notes  {LIVE_BADGE}",
+            f"Fitting Room  {LIVE_BADGE}",
+        ]
+    )
     with tabs[0]:
-        _render_paste_notes_tab(tech_pack)
+        _render_revise_table_tab(tech_pack)
     with tabs[1]:
+        _render_paste_notes_tab(tech_pack)
+    with tabs[2]:
         _render_fitting_room_live(tech_pack)
+
+    _render_pending_fit_preview(tech_pack)
 
 
 def section_send_to_factory() -> None:

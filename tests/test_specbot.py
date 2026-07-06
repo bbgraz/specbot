@@ -511,6 +511,37 @@ def t_ui_workflow_navigation():
     assert at.session_state["nav_stage"] == "techpack", "stepper forward works after back"
 check("UI: stepper nav — gating, back/forward navigation, all stages render", t_ui_workflow_navigation)
 
+def t_structured_updates():
+    from fit_update_service import apply_structured_updates
+    tp = copy.deepcopy(SAMPLE_TP)
+    revised = apply_structured_updates(tp, [
+        {"pom": "Chest Width", "new_target": "22", "delta": None,
+         "tolerance_plus": "0.5", "tolerance_minus": None, "action": "update", "reason": "Fit 1 revision"},
+        {"pom": "Armhole Depth", "new_target": None, "delta": "+1/4",
+         "tolerance_plus": None, "tolerance_minus": None, "action": "update", "reason": "Fit 1 revision"},
+        {"pom": "Sleeve Length", "new_target": None, "delta": "-6",
+         "tolerance_plus": None, "tolerance_minus": None, "action": "update", "reason": "typo test"},
+    ])
+    assert tp["measurements"][0]["target"] == "21", "original untouched"
+    m = {r["pom"]: r for r in revised["measurements"]}
+    assert m["Chest Width"]["target"] == "22" and m["Chest Width"]["tolerance_plus"] == "0.5"
+    assert m["Armhole Depth"]["target"] == "9.75"  # fraction delta, no math needed
+    assert m["Sleeve Length"]["target"] == "8.25", "implausible -6 blocked"
+    assert any("NOT APPLIED" in e["reason"] for e in revised["change_log"])
+    assert len(revised["change_log"]) == 4  # target+tol, delta, blocked
+check("Worksheet engine: direct new-target + fraction delta + cap, change-logged", t_structured_updates)
+
+def t_ui_revise_table_present():
+    from streamlit.testing.v1 import AppTest
+    at = AppTest.from_file(str(APP_DIR / "app.py"), default_timeout=60)
+    at.run()
+    [b for b in at.button if "Demo" in (b.label or "")][0].click().run()
+    at.button(key="nav_btn_fit").click().run()
+    assert len(at.exception) == 0
+    assert [b for b in at.button if b.key == "revise_preview_btn"], "worksheet preview button missing"
+    assert at.text_input(key="revise_reason_input").value, "reason field should be prefilled"
+check("UI: Revise Table worksheet renders on Fit & Revise", t_ui_revise_table_present)
+
 def t_ui_style_archive():
     from streamlit.testing.v1 import AppTest
     at = AppTest.from_file(str(APP_DIR / "app.py"), default_timeout=60)
