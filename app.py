@@ -85,6 +85,7 @@ def _empty_tech_pack() -> dict[str, Any]:
         "garment_summary": "",
         "detected_features": [],
         "measurements": [],
+        "original_measurements": [],
         "construction_notes": [],
         "bom": [],
         "change_log": [],
@@ -162,6 +163,7 @@ def _to_tech_pack(analysis: dict[str, Any], metadata: dict[str, Any]) -> dict[st
     tp = {
         **_empty_tech_pack(),
         **metadata,
+        "original_measurements": copy.deepcopy(measurements),
         "garment_summary": analysis.get("garment_summary", ""),
         "detected_features": analysis.get("detected_features", []) or [],
         "measurements": measurements,
@@ -400,9 +402,97 @@ def _persist_current_tech_pack() -> None:
         pass
 
 
+def _push_undo_snapshot() -> None:
+    """Push the current tech pack onto the undo stack (max 20) and clear redo."""
+    stack = st.session_state.setdefault("undo_stack", [])
+    stack.append(copy.deepcopy(st.session_state.tech_pack))
+    del stack[:-20]
+    st.session_state.redo_stack = []
+
+
+def _bump_editor_epoch() -> None:
+    """Force data editors to rebuild from the restored tech pack state."""
+    st.session_state.editor_epoch = int(st.session_state.get("editor_epoch", 0)) + 1
+
+
+def _original_measurements(tp: dict[str, Any]) -> list[dict[str, Any]]:
+    original = tp.get("original_measurements")
+    if original:
+        return original
+    history = tp.get("measurement_history") or []
+    if history:
+        return history[0].get("measurements") or []
+    return []
+
+
+def _render_undo_controls(prefix: str) -> None:
+    """Multi-step Undo / Redo plus reset-to-original-draft measurements."""
+    tp = st.session_state.tech_pack
+    if not tp.get("style_number"):
+        return
+    undo_stack = st.session_state.get("undo_stack") or []
+    redo_stack = st.session_state.get("redo_stack") or []
+    original = _original_measurements(tp)
+
+    cols = st.columns([1, 1, 2.2, 3])
+    if cols[0].button(
+        f"↩ Undo ({len(undo_stack)})",
+        key=f"{prefix}_undo_btn",
+        disabled=not undo_stack,
+        help="Step back through applied changes (up to 20 steps).",
+    ):
+        st.session_state.setdefault("redo_stack", []).append(copy.deepcopy(tp))
+        st.session_state.tech_pack = st.session_state.undo_stack.pop()
+        st.session_state.pending_fit = None
+        _bump_editor_epoch()
+        _persist_current_tech_pack()
+        st.rerun()
+    if cols[1].button(
+        f"↪ Redo ({len(redo_stack)})",
+        key=f"{prefix}_redo_btn",
+        disabled=not redo_stack,
+        help="Step forward again after an undo.",
+    ):
+        st.session_state.setdefault("undo_stack", []).append(copy.deepcopy(tp))
+        st.session_state.tech_pack = st.session_state.redo_stack.pop()
+        st.session_state.pending_fit = None
+        _bump_editor_epoch()
+        _persist_current_tech_pack()
+        st.rerun()
+    if cols[2].button(
+        "⟲ Reset to original measurements",
+        key=f"{prefix}_reset_btn",
+        disabled=not original,
+        help=(
+            "Reverts every measurement to the first generated draft. "
+            "The reset itself is undoable and is recorded in the change log."
+        ),
+    ):
+        from fit_update_service import _add_change_log
+
+        _push_undo_snapshot()
+        tp = st.session_state.tech_pack
+        tp["measurements"] = copy.deepcopy(original)
+        _add_change_log(
+            tp,
+            "(all POMs)",
+            "measurements",
+            "current values",
+            "original draft values",
+            "Reset to original measurements",
+        )
+        tp["change_log"][-1]["stage"] = tp.get("sample_stage", DEFAULT_STAGE)
+        st.session_state.pending_fit = None
+        _bump_editor_epoch()
+        _persist_current_tech_pack()
+        st.rerun()
+
+
 def _commit_fit_revision(old_tp: dict[str, Any], revised: dict[str, Any], stage: str) -> None:
     """Commit an approved fit revision: bump rev, snapshot prior measurements,
     stamp the stage on new change-log entries, persist."""
+    _push_undo_snapshot()
+    _bump_editor_epoch()
     prev_rev = int(old_tp.get("rev") or 0)
     revised["rev"] = prev_rev + 1
     revised["sample_stage"] = stage
@@ -437,6 +527,9 @@ def _init_state() -> None:
     st.session_state.setdefault("pasted_sketch_bytes", None)
     st.session_state.setdefault("pasted_sketch_mime", None)
     st.session_state.setdefault("_flashes", [])
+    st.session_state.setdefault("undo_stack", [])
+    st.session_state.setdefault("redo_stack", [])
+    st.session_state.setdefault("editor_epoch", 0)
     # Persist intake-form values across stage navigation. The self-assignment
     # marks the keys as app-managed so Streamlit's widget cleanup doesn't drop
     # them when the Intake stage isn't rendered.
@@ -1226,6 +1319,7 @@ def _log_manual_measurement_edits(
 
 
 def _tab_measurements(tech_pack: dict[str, Any]) -> None:
+    _render_undo_controls("meas")
     st.caption(
         f"{LIVE_BADGE}. Editable — every manual change is recorded in the change log. "
         "Source values control whether a row is AI-derived, inferred, a placeholder "
@@ -1235,7 +1329,7 @@ def _tab_measurements(tech_pack: dict[str, Any]) -> None:
         _measurements_df(tech_pack),
         num_rows="dynamic",
         use_container_width=True,
-        key="measurements_editor",
+        key=f"measurements_editor_{st.session_state.get('editor_epoch', 0)}",
         column_config={
             "source": st.column_config.SelectboxColumn(
                 "source",
@@ -1253,6 +1347,7 @@ def _tab_measurements(tech_pack: dict[str, Any]) -> None:
     new_rows = _df_to_measurements(edited)
     old_rows = tech_pack.get("measurements") or []
     if new_rows != old_rows:
+        _push_undo_snapshot()
         logged = _log_manual_measurement_edits(tech_pack, old_rows, new_rows)
         tech_pack["measurements"] = new_rows
         _persist_current_tech_pack()
@@ -1289,7 +1384,7 @@ def _tab_grading(tech_pack: dict[str, Any]) -> None:
         num_rows="fixed",
         use_container_width=True,
         hide_index=True,
-        key="grading_rules_editor",
+        key=f"grading_rules_editor_{st.session_state.get('editor_epoch', 0)}",
         column_config={
             "POM": st.column_config.TextColumn("POM", disabled=True),
             "Grade rule (in)": st.column_config.NumberColumn(
@@ -1359,7 +1454,7 @@ def _tab_construction(tech_pack: dict[str, Any]) -> None:
         df,
         num_rows="dynamic",
         use_container_width=True,
-        key="construction_editor",
+        key=f"construction_editor_{st.session_state.get('editor_epoch', 0)}",
         column_config={
             "zone": st.column_config.SelectboxColumn("zone", options=CONSTRUCTION_ZONES),
             "stitch_type": st.column_config.SelectboxColumn(
@@ -1398,7 +1493,7 @@ def _tab_bom(tech_pack: dict[str, Any]) -> None:
         num_rows="dynamic",
         use_container_width=True,
         hide_index=True,
-        key="bom_editor",
+        key=f"bom_editor_{st.session_state.get('editor_epoch', 0)}",
         column_config={
             "component": st.column_config.TextColumn("Component"),
             "material": st.column_config.TextColumn("Material"),
@@ -1851,9 +1946,9 @@ def _render_revise_table_tab(tech_pack: dict[str, Any]) -> None:
         st.info("No measurements yet — generate a tech pack first.")
         return
 
-    cols = st.columns([3, 1])
-    with cols[1]:
-        current_stage = tech_pack.get("sample_stage", DEFAULT_STAGE)
+    ctrl = st.columns([1, 2, 3])
+    current_stage = tech_pack.get("sample_stage", DEFAULT_STAGE)
+    with ctrl[0]:
         try:
             stage_idx = SAMPLE_STAGES.index(current_stage)
         except ValueError:
@@ -1864,6 +1959,7 @@ def _render_revise_table_tab(tech_pack: dict[str, Any]) -> None:
             index=stage_idx,
             key="revise_stage_select",
         )
+    with ctrl[1]:
         reason_default = st.text_input(
             "Reason (applies to all rows)",
             value=f"{current_stage} fit revision",
@@ -1881,22 +1977,21 @@ def _render_revise_table_tab(tech_pack: dict[str, Any]) -> None:
         }
         for m in measurements
     ]
-    with cols[0]:
-        edited = st.data_editor(
-            pd.DataFrame(rows),
-            num_rows="fixed",
-            use_container_width=True,
-            hide_index=True,
-            key="revise_table_editor",
-            column_config={
-                "POM": st.column_config.TextColumn("POM", disabled=True),
-                "Current": st.column_config.TextColumn("Current", disabled=True),
-                "New target": st.column_config.TextColumn("New target"),
-                "Δ +/-": st.column_config.TextColumn("Δ +/-"),
-                "Tol +": st.column_config.TextColumn("Tol +"),
-                "Tol -": st.column_config.TextColumn("Tol -"),
-            },
-        )
+    edited = st.data_editor(
+        pd.DataFrame(rows),
+        num_rows="fixed",
+        use_container_width=True,
+        hide_index=True,
+        key=f"revise_table_editor_{st.session_state.get('editor_epoch', 0)}",
+        column_config={
+            "POM": st.column_config.TextColumn("POM", disabled=True, pinned=True),
+            "Current": st.column_config.TextColumn("Current (read-only)", disabled=True),
+            "New target": st.column_config.TextColumn("✏️ New target"),
+            "Δ +/-": st.column_config.TextColumn("✏️ Δ +/-"),
+            "Tol +": st.column_config.TextColumn("Tol +"),
+            "Tol -": st.column_config.TextColumn("Tol -"),
+        },
+    )
 
     if st.button("Preview Changes", key="revise_preview_btn", type="primary"):
         updates: list[dict[str, Any]] = []
@@ -2013,6 +2108,7 @@ def section_fitting_notes() -> None:
         st.info("Generate a tech pack first.", icon="ℹ️")
         return
 
+    _render_undo_controls("fit")
     st.markdown(
         "Bring fit results into the spec, three ways: **Revise Table** for direct "
         "entry (no math — type the new number or the delta), **Paste Notes** for "

@@ -542,6 +542,38 @@ def t_ui_revise_table_present():
     assert at.text_input(key="revise_reason_input").value, "reason field should be prefilled"
 check("UI: Revise Table worksheet renders on Fit & Revise", t_ui_revise_table_present)
 
+def t_ui_undo_redo_reset():
+    from streamlit.testing.v1 import AppTest
+    at = AppTest.from_file(str(APP_DIR / "app.py"), default_timeout=60)
+    at.run()
+    [b for b in at.button if "Demo" in (b.label or "")][0].click().run()
+    at.button(key="nav_btn_fit").click().run()
+
+    def armhole():
+        return next(m["target"] for m in at.session_state["tech_pack"]["measurements"]
+                    if m["pom"] == "Armhole Depth")
+
+    # apply a fit change: 9.5 -> 9.75
+    at.text_area(key="fitting_notes_input").set_value("raise armhole depth by 1/4")
+    at.button(key="preview_fitting_btn").click().run()
+    at.button(key="apply_fitting_btn").click().run()
+    assert armhole() == "9.75"
+    # undo -> 9.5
+    at.button(key="fit_undo_btn").click().run()
+    assert len(at.exception) == 0
+    assert armhole() == "9.5", "undo should restore prior state"
+    # redo -> 9.75
+    at.button(key="fit_redo_btn").click().run()
+    assert armhole() == "9.75", "redo should re-apply"
+    # reset -> original 9.5, change-logged, and itself undoable
+    at.button(key="fit_reset_btn").click().run()
+    assert armhole() == "9.5", "reset should restore original draft values"
+    log = at.session_state["tech_pack"]["change_log"]
+    assert any("Reset to original measurements" in e.get("reason", "") for e in log)
+    at.button(key="fit_undo_btn").click().run()
+    assert armhole() == "9.75", "reset must be undoable"
+check("UI: multi-step undo/redo + reset-to-original, all change-logged", t_ui_undo_redo_reset)
+
 def t_ui_style_archive():
     from streamlit.testing.v1 import AppTest
     at = AppTest.from_file(str(APP_DIR / "app.py"), default_timeout=60)
