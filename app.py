@@ -450,6 +450,7 @@ def _init_state() -> None:
     ):
         st.session_state[k] = st.session_state.get(k, "")
     st.session_state.form_sample_stage = st.session_state.get("form_sample_stage", DEFAULT_STAGE)
+    st.session_state.camera_enable = st.session_state.get("camera_enable", False)
     # Apply queued navigation BEFORE the nav widget is instantiated.
     if st.session_state.get("_pending_nav"):
         st.session_state.nav_stage = st.session_state.pop("_pending_nav")
@@ -852,10 +853,16 @@ def _render_alt_sketch_inputs() -> None:
                     "Clipboard paste unavailable in this browser — use upload or camera."
                 )
         with cols[1]:
-            snap = st.camera_input("📷 Snap a paper sketch", key="camera_sketch")
-            if snap is not None:
-                st.session_state.pasted_sketch_bytes = snap.getvalue()
-                st.session_state.pasted_sketch_mime = snap.type or "image/jpeg"
+            # The camera widget activates the webcam the moment it renders,
+            # so only instantiate it after an explicit opt-in.
+            use_camera = st.toggle(
+                "📷 Use camera to photograph a sketch", key="camera_enable"
+            )
+            if use_camera:
+                snap = st.camera_input("Snap a paper sketch", key="camera_sketch")
+                if snap is not None:
+                    st.session_state.pasted_sketch_bytes = snap.getvalue()
+                    st.session_state.pasted_sketch_mime = snap.type or "image/jpeg"
         if st.session_state.get("pasted_sketch_bytes"):
             st.image(
                 st.session_state.pasted_sketch_bytes,
