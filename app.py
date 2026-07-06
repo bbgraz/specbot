@@ -81,6 +81,7 @@ def _empty_tech_pack() -> dict[str, Any]:
         "fabric": "",
         "sample_size": "",
         "sample_stage": DEFAULT_STAGE,
+        "style_description": "",
         "garment_summary": "",
         "detected_features": [],
         "measurements": [],
@@ -328,6 +329,8 @@ def _init_state() -> None:
     st.session_state.setdefault("last_email_result", None)
     st.session_state.setdefault("last_fitting_summary", None)
     st.session_state.setdefault("pending_fit", None)
+    st.session_state.setdefault("pasted_sketch_bytes", None)
+    st.session_state.setdefault("pasted_sketch_mime", None)
     st.session_state.setdefault("uploaded_sketch_bytes", None)
     st.session_state.setdefault("uploaded_sketch_mime", None)
     st.session_state.setdefault("fitting_demo_played", False)
@@ -686,6 +689,65 @@ def _load_demo_tech_pack() -> None:
     st.session_state.uploaded_sketch_mime = None
 
 
+def _render_alt_sketch_inputs() -> None:
+    """Paste-from-clipboard and camera capture as alternatives to file upload.
+
+    Whichever source was used most recently lands in
+    st.session_state.pasted_sketch_bytes and is picked up at generation time
+    when no file is uploaded.
+    """
+    with st.expander("No file? Paste a screenshot or photograph the sketch"):
+        cols = st.columns(2)
+        with cols[0]:
+            try:
+                from streamlit_paste_button import paste_image_button
+
+                result = paste_image_button(
+                    "📋 Paste sketch from clipboard", key="paste_sketch_btn"
+                )
+                if getattr(result, "image_data", None) is not None:
+                    import io as _io
+
+                    buf = _io.BytesIO()
+                    result.image_data.convert("RGB").save(buf, format="PNG")
+                    st.session_state.pasted_sketch_bytes = buf.getvalue()
+                    st.session_state.pasted_sketch_mime = "image/png"
+            except Exception:  # noqa: BLE001 - component optional; never block setup
+                st.caption(
+                    "Clipboard paste unavailable in this browser — use upload or camera."
+                )
+        with cols[1]:
+            snap = st.camera_input("📷 Snap a paper sketch", key="camera_sketch")
+            if snap is not None:
+                st.session_state.pasted_sketch_bytes = snap.getvalue()
+                st.session_state.pasted_sketch_mime = snap.type or "image/jpeg"
+        if st.session_state.get("pasted_sketch_bytes"):
+            st.image(
+                st.session_state.pasted_sketch_bytes,
+                caption="Captured sketch — will be used if no file is uploaded above.",
+                width=260,
+            )
+            if st.button("Clear captured sketch", key="clear_pasted_sketch"):
+                st.session_state.pasted_sketch_bytes = None
+                st.session_state.pasted_sketch_mime = None
+                st.rerun()
+
+
+class _MemorySketch:
+    """Duck-typed stand-in for a Streamlit UploadedFile (has .read/.type/.name)."""
+
+    def __init__(self, data: bytes, mime: str, name: str = "pasted_sketch.png"):
+        self._data = data
+        self.type = mime
+        self.name = name
+
+    def read(self) -> bytes:
+        return self._data
+
+    def getvalue(self) -> bytes:
+        return self._data
+
+
 def section_style_setup() -> None:
     st.markdown("Drop a sketch and a few fields. Output appears in the **Tech Pack** tab.")
     with st.form("style_setup_form", clear_on_submit=False):
@@ -714,7 +776,19 @@ def section_style_setup() -> None:
                 "Sample stage", options=SAMPLE_STAGES, index=0, key="form_sample_stage"
             )
 
+        style_description = st.text_area(
+            "Design intent / style description (optional — treated as designer-stated fact)",
+            placeholder=(
+                "e.g. Oversized boxy fit with dropped shoulders, heavyweight fleece, "
+                "raw-edge hems. Like our FW24 crew but 2\" longer, kangaroo pocket."
+            ),
+            height=90,
+            key="form_style_description",
+        )
+
         submitted = st.form_submit_button("Generate Tech Pack", type="primary")
+
+    _render_alt_sketch_inputs()
 
     demo_col, demo_help_col = st.columns([1, 3])
     with demo_col:
@@ -746,7 +820,15 @@ def section_style_setup() -> None:
         "fabric": fabric,
         "sample_size": sample_size,
         "sample_stage": sample_stage,
+        "style_description": (style_description or "").strip(),
     }
+
+    # Sketch source priority: uploaded file, else pasted/camera capture.
+    if upload is None and st.session_state.get("pasted_sketch_bytes"):
+        upload = _MemorySketch(
+            st.session_state.pasted_sketch_bytes,
+            st.session_state.get("pasted_sketch_mime") or "image/png",
+        )
 
     if upload is not None:
         try:

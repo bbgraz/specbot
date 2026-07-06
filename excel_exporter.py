@@ -114,6 +114,7 @@ def export_tech_pack_to_excel(
         ("Fabric", tech_pack.get("fabric", "")),
         ("Sample size", tech_pack.get("sample_size", "")),
         ("Sample stage", tech_pack.get("sample_stage", "")),
+        ("Design intent", tech_pack.get("style_description", "")),
         ("Garment summary", tech_pack.get("garment_summary", "")),
     ]
     for label, value in cover_pairs:

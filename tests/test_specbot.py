@@ -429,6 +429,37 @@ def t_ui_load_demo():
 check("UI: Load Demo Tech Pack populates a full tech pack offline", t_ui_load_demo)
 
 
+def t_description_in_prompt():
+    from gpt_service import _build_user_content
+    meta = {"style_name": "Boxy Tee", "garment_type": "crewneck tee",
+            "style_description": "Oversized boxy fit, dropped shoulders, raw-edge hems"}
+    content = _build_user_content(None, None, meta)
+    text = content[0]["text"]
+    assert "Design intent stated by the designer" in text
+    assert "dropped shoulders" in text
+    assert "derived_from_input" in text
+    # and absent when not provided
+    text2 = _build_user_content(None, None, {"style_name": "X", "garment_type": "tee"})[0]["text"]
+    assert "Design intent stated" not in text2
+check("Style description feeds GPT prompt as designer-stated fact", t_description_in_prompt)
+
+def t_description_offline_and_ui():
+    from streamlit.testing.v1 import AppTest
+    at = AppTest.from_file(str(APP_DIR / "app.py"), default_timeout=60)
+    at.run()
+    at.text_input(key="form_style_name").set_value("Boxy Tee")
+    at.text_input(key="form_style_number").set_value("SS26-014")
+    at.text_input(key="form_garment_type").set_value("crewneck tee")
+    at.text_area(key="form_style_description").set_value("Oversized boxy fit, raw-edge hems")
+    subs = [b for b in at.button if "Generate" in (b.label or "")]
+    subs[0].click().run()
+    assert len(at.exception) == 0
+    tp = at.session_state["tech_pack"]
+    assert tp["style_description"] == "Oversized boxy fit, raw-edge hems"
+    assert any("NOT interpreted" in m for m in tp["missing_information"]), \
+        "offline draft must flag that the description was not analyzed"
+check("UI: description captured on tech pack; offline draft flags it honestly", t_description_offline_and_ui)
+
 def t_ui_preview_apply_flow():
     from streamlit.testing.v1 import AppTest
     at = AppTest.from_file(str(APP_DIR / "app.py"), default_timeout=60)

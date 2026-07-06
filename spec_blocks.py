@@ -465,6 +465,19 @@ def build_offline_draft(metadata: dict[str, Any]) -> dict[str, Any]:
         "performed — every value is a standard-practice baseline for a technical designer to review."
     )
 
+    missing = [
+        "Sketch not analyzed (offline draft) — visual design details are not reflected.",
+        "Fabric weight/content, trims, and colorways must be confirmed by the designer.",
+    ]
+    description = (metadata.get("style_description") or "").strip()
+    if description:
+        missing.insert(
+            0,
+            "Design description provided but NOT interpreted (offline draft) — "
+            "apply it manually or regenerate with an API key: "
+            f"“{description[:160]}”",
+        )
+
     return {
         "garment_summary": summary,
         "detected_features": [],
@@ -476,8 +489,5 @@ def build_offline_draft(metadata: dict[str, Any]) -> dict[str, Any]:
             "no AI sketch analysis was used.",
             "Tolerances are category defaults — confirm against the brand tolerance standard.",
         ],
-        "missing_information": [
-            "Sketch not analyzed (offline draft) — visual design details are not reflected.",
-            "Fabric weight/content, trims, and colorways must be confirmed by the designer.",
-        ],
+        "missing_information": missing,
     }

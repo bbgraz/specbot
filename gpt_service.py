@@ -152,13 +152,25 @@ def _build_user_content(
     metadata: dict[str, Any],
     grounding_block: str = "",
 ) -> list[dict[str, Any]]:
+    description = (metadata.get("style_description") or "").strip()
+    description_block = (
+        (
+            "\nDesign intent stated by the designer (treat these as designer-stated "
+            "facts — label features and values that come from this text as "
+            "derived_from_input):\n"
+            f'"""\n{description}\n"""\n'
+        )
+        if description
+        else ""
+    )
     metadata_block = (
         "Style metadata provided by the designer:\n"
         f"- Style name: {metadata.get('style_name') or 'N/A'}\n"
         f"- Style number: {metadata.get('style_number') or 'N/A'}\n"
         f"- Garment type: {metadata.get('garment_type') or 'N/A'}\n"
         f"- Fabric: {metadata.get('fabric') or 'N/A'}\n"
-        f"- Sample size: {metadata.get('sample_size') or 'N/A'}\n\n"
+        f"- Sample size: {metadata.get('sample_size') or 'N/A'}\n"
+        f"{description_block}\n"
         + (f"{grounding_block}\n\n" if grounding_block else "")
         + "Return JSON with keys: "
         "garment_summary, detected_features, suggested_measurements, "
