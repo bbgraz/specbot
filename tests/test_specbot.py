@@ -460,12 +460,30 @@ def t_description_offline_and_ui():
         "offline draft must flag that the description was not analyzed"
 check("UI: description captured on tech pack; offline draft flags it honestly", t_description_offline_and_ui)
 
+def t_ui_workflow_navigation():
+    from streamlit.testing.v1 import AppTest
+    at = AppTest.from_file(str(APP_DIR / "app.py"), default_timeout=60)
+    at.run()
+    assert at.session_state["nav_stage"] == "intake", "app starts at Style Intake"
+    # gated stages redirect to intake when no style is loaded
+    for stage in ("techpack", "fit", "send"):
+        at.radio(key="nav_stage").set_value(stage).run()
+        assert len(at.exception) == 0
+        assert any("Style Intake" in str(i.value) for i in at.info), f"{stage} should be gated"
+    # ungated stages render without a style
+    for stage in ("wip", "library"):
+        at.radio(key="nav_stage").set_value(stage).run()
+        assert len(at.exception) == 0
+check("UI: workflow nav — starts at Intake, gates stages, all stages render", t_ui_workflow_navigation)
+
 def t_ui_preview_apply_flow():
     from streamlit.testing.v1 import AppTest
     at = AppTest.from_file(str(APP_DIR / "app.py"), default_timeout=60)
     at.run()
     demo = [b for b in at.button if "Demo" in (b.label or "")]
     demo[0].click().run()
+    assert at.session_state["nav_stage"] == "techpack", "demo load should advance to Tech Pack"
+    at.radio(key="nav_stage").set_value("fit").run()
     at.text_area(key="fitting_notes_input").set_value("raise armhole depth by 1/4\nshorten body length by 40")
     preview = [b for b in at.button if b.key == "preview_fitting_btn"]
     assert preview, "Preview Changes button not found"

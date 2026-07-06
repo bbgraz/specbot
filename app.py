@@ -284,6 +284,38 @@ def _from_b64(s: str) -> bytes:
         return b""
 
 
+# ---------------------------------------------------------------------------
+# Workflow navigation — the app follows the tech-designer process:
+# Intake → Tech Pack → Fit & Revise → Send to Factory → WIP Board.
+# ---------------------------------------------------------------------------
+
+WORKFLOW_STAGES: list[tuple[str, str]] = [
+    ("intake", "① Style Intake"),
+    ("techpack", "② Tech Pack"),
+    ("fit", "③ Fit & Revise"),
+    ("send", "④ Send to Factory"),
+    ("wip", "⑤ WIP Board"),
+    ("library", "📚 Brand Library"),
+]
+_STAGE_LABELS = dict(WORKFLOW_STAGES)
+
+
+def _go(stage: str) -> None:
+    """Navigate to a workflow stage on the next rerun (safe for widget state)."""
+    st.session_state._pending_nav = stage
+    st.rerun()
+
+
+def _flash(level: str, message: str) -> None:
+    """Queue a message that survives the rerun caused by navigation."""
+    st.session_state.setdefault("_flashes", []).append((level, message))
+
+
+def _render_flashes() -> None:
+    for level, message in st.session_state.pop("_flashes", []) or []:
+        getattr(st, level, st.info)(message)
+
+
 def _persist_current_tech_pack() -> None:
     """Save the currently-loaded tech pack to disk; swallow errors quietly."""
     tp = st.session_state.get("tech_pack") or {}
@@ -331,6 +363,24 @@ def _init_state() -> None:
     st.session_state.setdefault("pending_fit", None)
     st.session_state.setdefault("pasted_sketch_bytes", None)
     st.session_state.setdefault("pasted_sketch_mime", None)
+    st.session_state.setdefault("_flashes", [])
+    # Persist intake-form values across stage navigation. The self-assignment
+    # marks the keys as app-managed so Streamlit's widget cleanup doesn't drop
+    # them when the Intake stage isn't rendered.
+    for k in (
+        "form_style_name",
+        "form_style_number",
+        "form_garment_type",
+        "form_fabric",
+        "form_sample_size",
+        "form_style_description",
+    ):
+        st.session_state[k] = st.session_state.get(k, "")
+    st.session_state.form_sample_stage = st.session_state.get("form_sample_stage", DEFAULT_STAGE)
+    # Apply queued navigation BEFORE the nav widget is instantiated.
+    if st.session_state.get("_pending_nav"):
+        st.session_state.nav_stage = st.session_state.pop("_pending_nav")
+    st.session_state.setdefault("nav_stage", "intake")
     st.session_state.setdefault("uploaded_sketch_bytes", None)
     st.session_state.setdefault("uploaded_sketch_mime", None)
     st.session_state.setdefault("fitting_demo_played", False)
@@ -388,34 +438,41 @@ def _sidebar_saved_styles() -> None:
 def sidebar() -> None:
     tech_pack = st.session_state.tech_pack
     with st.sidebar:
+        st.markdown("### Workflow")
+        st.radio(
+            "Workflow stage",
+            options=[key for key, _ in WORKFLOW_STAGES],
+            format_func=lambda k: _STAGE_LABELS[k],
+            key="nav_stage",
+            label_visibility="collapsed",
+        )
+
+        st.divider()
         st.markdown("### Current style")
         if tech_pack.get("style_number"):
             st.markdown(
                 f"**{tech_pack.get('style_number')}** · {tech_pack.get('style_name') or '(no name)'}"
             )
             st.caption(
-                f"Stage: **{tech_pack.get('sample_stage', DEFAULT_STAGE)}**  ·  "
-                f"Type: {tech_pack.get('garment_type') or '—'}  ·  "
-                f"Sample size: {tech_pack.get('sample_size') or '—'}"
+                f"Rev **{tech_pack.get('rev', 0)}** · Stage **{tech_pack.get('sample_stage', DEFAULT_STAGE)}**  ·  "
+                f"{tech_pack.get('garment_type') or '—'} · size {tech_pack.get('sample_size') or '—'}"
             )
         else:
-            st.caption("No style loaded yet.")
+            st.caption("No style loaded — start at ① Style Intake.")
 
         st.divider()
         _sidebar_saved_styles()
 
-        st.divider()
-        st.markdown("### Roadmap")
-        live = [r for r in FEATURE_ROADMAP if r["status"] == "live"]
-        preview = [r for r in FEATURE_ROADMAP if r["status"] == "preview"]
-        st.markdown(f"**{LIVE_BADGE} ({len(live)})**")
-        for r in live:
-            st.markdown(f"- {r['feature']}")
-        st.markdown(f"**{PREVIEW_BADGE} ({len(preview)})**")
-        for r in preview:
-            st.markdown(f"- {r['feature']}")
+        with st.expander("Feature roadmap"):
+            live = [r for r in FEATURE_ROADMAP if r["status"] == "live"]
+            preview = [r for r in FEATURE_ROADMAP if r["status"] == "preview"]
+            st.markdown(f"**{LIVE_BADGE} ({len(live)})**")
+            for r in live:
+                st.markdown(f"- {r['feature']}")
+            st.markdown(f"**{PREVIEW_BADGE} ({len(preview)})**")
+            for r in preview:
+                st.markdown(f"- {r['feature']}")
 
-        st.divider()
         st.caption(
             "Demo only. Outbound emails are forced to `TEST_EMAIL_RECIPIENT`. "
             "Tech-pack values must be reviewed by a technical designer."
@@ -519,15 +576,10 @@ def _hero() -> None:
         """,
         unsafe_allow_html=True,
     )
-    if not os.getenv("OPENAI_API_KEY"):
-        st.warning(
-            "OPENAI_API_KEY is not set. Tech-pack generation will fail; fitting-note "
-            "updates will fall back to a small rule-based parser.",
-            icon="⚠️",
-        )
 
 
 def _status_strip() -> None:
+    """Persistent style-context strip: identity + where it sits in the process."""
     tech_pack = st.session_state.tech_pack
     if not tech_pack.get("style_number"):
         return
@@ -536,14 +588,30 @@ def _status_strip() -> None:
     stage = tech_pack.get("sample_stage", DEFAULT_STAGE)
     garment = tech_pack.get("garment_type") or "—"
     sample_size = tech_pack.get("sample_size") or "—"
+    rev = tech_pack.get("rev", 0)
+    fit_rounds = len(tech_pack.get("measurement_history") or [])
+
+    sent = False
+    for record in load_wip_records():
+        if record.get("style_number") == tech_pack.get("style_number"):
+            sent = record.get("status") == "Sent to Factory"
+            break
+    progress = (
+        "Draft ✓ · "
+        + (f"Fit rounds: {fit_rounds}" if fit_rounds else "No fit rounds yet")
+        + (" · Sent to factory ✓" if sent else "")
+    )
+
     st.markdown(
         f"""
         <div class="specbot-status-strip">
           <div><span class="label">Style</span><span class="pill">{style_no}</span></div>
           <div><span class="label">Name</span><span class="pill">{style_name}</span></div>
           <div><span class="label">Type</span><span class="pill">{garment}</span></div>
-          <div><span class="label">Sample size</span><span class="pill">{sample_size}</span></div>
+          <div><span class="label">Size</span><span class="pill">{sample_size}</span></div>
           <div><span class="label">Stage</span><span class="pill">{stage}</span></div>
+          <div><span class="label">Rev</span><span class="pill">{rev}</span></div>
+          <div><span class="label">Progress</span><span class="pill">{progress}</span></div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -749,7 +817,15 @@ class _MemorySketch:
 
 
 def section_style_setup() -> None:
-    st.markdown("Drop a sketch and a few fields. Output appears in the **Tech Pack** tab.")
+    st.markdown(
+        "Drop a sketch, add the style basics, generate — you'll land on the "
+        "**② Tech Pack** stage to review and edit the draft."
+    )
+    if not os.getenv("OPENAI_API_KEY"):
+        st.caption(
+            "⚠️ No OPENAI_API_KEY set — generation runs offline from the "
+            "category-standard spec block (sketch won't be analyzed)."
+        )
     with st.form("style_setup_form", clear_on_submit=False):
         upload = st.file_uploader(
             "Upload sketch (PDF, JPG, PNG)",
@@ -800,10 +876,12 @@ def section_style_setup() -> None:
         )
     if demo_clicked:
         _load_demo_tech_pack()
-        st.success(
+        _flash(
+            "success",
             "Demo tech pack loaded (offline draft from the category-standard spec block). "
-            "Review it in the Tech Pack tab, then try fitting notes and export."
+            "Review it below, then move on to ③ Fit & Revise.",
         )
+        _go("techpack")
         return
 
     if not submitted:
@@ -842,11 +920,13 @@ def section_style_setup() -> None:
         analysis = build_offline_draft(metadata)
         st.session_state.tech_pack = _to_tech_pack(analysis, metadata)
         st.session_state.export_path = None
-        st.warning(
+        _flash(
+            "warning",
             "No OPENAI_API_KEY configured — generated an offline draft from the "
             "category-standard spec block instead. The sketch was NOT analyzed. "
-            "Add an API key to .env for AI sketch analysis."
+            "Add an API key to .env for AI sketch analysis.",
         )
+        _go("techpack")
         return
 
     try:
@@ -862,11 +942,17 @@ def section_style_setup() -> None:
     with st.spinner("Grounding against brand library and drafting tech pack…"):
         try:
             analysis = analyze_sketch(upload, metadata, grounding_block=grounding_block)
+            _flash(
+                "success",
+                "Draft tech pack generated and grounded against the brand library. "
+                "Review below, then move on to ③ Fit & Revise.",
+            )
         except Exception as exc:  # noqa: BLE001
             analysis = build_offline_draft(metadata)
-            st.warning(
+            _flash(
+                "warning",
                 f"GPT call failed ({exc}). Generated an offline draft from the "
-                "category-standard spec block instead — the sketch was NOT analyzed."
+                "category-standard spec block instead — the sketch was NOT analyzed.",
             )
 
     analysis["grounding_report"] = report
@@ -876,8 +962,8 @@ def section_style_setup() -> None:
     try:
         save_tech_pack(tech_pack)
     except Exception as exc:  # noqa: BLE001
-        st.warning(f"Generated, but local save failed: {exc}")
-    st.success("Draft tech pack generated and grounded against the brand library. Review below.")
+        _flash("warning", f"Generated, but local save failed: {exc}")
+    _go("techpack")
 
 
 # ---- Tech pack preview ----------------------------------------------------
@@ -1282,21 +1368,22 @@ def section_tech_pack_preview() -> None:
         st.info("Generate a tech pack to see the preview.", icon="ℹ️")
         return
 
+    # Ordered the way a TD reviews a pack: what is it → spec → build → history.
     tab_labels = [
         "Overview",
         f"Measurements  {LIVE_BADGE}",
         f"Grading  {LIVE_BADGE}",
         f"Construction  {LIVE_BADGE}",
         f"BOM  {LIVE_BADGE}",
-        f"Costing  {PREVIEW_BADGE}",
-        f"Colorways  {PREVIEW_BADGE}",
         f"Annotations  {LIVE_BADGE}",
         f"Revisions  {LIVE_BADGE}",
-        "Assumptions",
+        f"Roadmap  {PREVIEW_BADGE}",
     ]
     tabs = st.tabs(tab_labels)
     with tabs[0]:
         _tab_overview(tech_pack)
+        st.divider()
+        _tab_assumptions(tech_pack)
     with tabs[1]:
         _tab_measurements(tech_pack)
     with tabs[2]:
@@ -1306,15 +1393,15 @@ def section_tech_pack_preview() -> None:
     with tabs[4]:
         _tab_bom(tech_pack)
     with tabs[5]:
-        _tab_costing(tech_pack)
-    with tabs[6]:
-        _tab_colorways(tech_pack)
-    with tabs[7]:
         _tab_annotations(tech_pack)
-    with tabs[8]:
+    with tabs[6]:
         _tab_revisions(tech_pack)
-    with tabs[9]:
-        _tab_assumptions(tech_pack)
+    with tabs[7]:
+        st.markdown("#### Costing")
+        _tab_costing(tech_pack)
+        st.divider()
+        st.markdown("#### Colorways")
+        _tab_colorways(tech_pack)
 
     st.divider()
     cols = st.columns([1, 1, 4])
@@ -1329,6 +1416,9 @@ def section_tech_pack_preview() -> None:
                 return
             st.session_state.export_path = path
             st.success(f"Excel exported: {Path(path).name}")
+    with cols[2]:
+        if st.button("Continue → ③ Fit & Revise", key="techpack_continue_btn"):
+            _go("fit")
     with cols[1]:
         if st.session_state.export_path and Path(st.session_state.export_path).is_file():
             path = Path(st.session_state.export_path)
@@ -1488,80 +1578,13 @@ def _render_fitting_room_live(tech_pack: dict[str, Any]) -> None:
             "See the **Tech Pack → Measurements / Change Log** tabs for the full diff."
         )
 
-    st.markdown("##### 4 · Draft factory email")
-    factories = load_factories()
-    if factories:
-        fcols = st.columns(2)
-        f_idx = fcols[0].selectbox(
-            "Factory",
-            options=range(len(factories)),
-            format_func=lambda i: factories[i]["factory_name"],
-            key="fitting_factory_select",
-        )
-        contact_options = factories[f_idx].get("contacts", [])
-        c_idx = fcols[1].selectbox(
-            "Contact",
-            options=range(len(contact_options)) if contact_options else [0],
-            format_func=lambda i: (
-                contact_options[i]["name"] if contact_options else "(no contacts)"
-            ),
-            key="fitting_contact_select",
-        )
-        factory_name = factories[f_idx]["factory_name"]
-        contact_name = contact_options[c_idx]["name"] if contact_options else ""
-    else:
-        factory_name = ""
-        contact_name = ""
-
-    if st.button("Draft email from this session", key="fitting_draft_btn", disabled=not has_openai):
-        if not transcript.strip() and not pinned:
-            st.warning("Capture a transcript or pin a photo first.")
-        else:
-            change_log = st.session_state.tech_pack.get("change_log", []) or []
-            recent_updates = change_log[-10:]
-            structured = [
-                {
-                    "pom": e.get("pom", ""),
-                    "delta": e.get("new_value", ""),
-                    "reason": e.get("reason", ""),
-                }
-                for e in recent_updates
-            ]
-            with st.spinner("Drafting…"):
-                try:
-                    from gpt_service import draft_fitting_email
-
-                    draft = draft_fitting_email(
-                        st.session_state.tech_pack,
-                        transcript,
-                        structured,
-                        pinned,
-                        factory_name=factory_name,
-                        contact_name=contact_name,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    st.error(f"Drafting failed: {exc}")
-                    draft = None
-            if draft:
-                st.session_state.fitting_draft_subject = draft["subject"]
-                st.session_state.fitting_draft_body = draft["body"]
-
-    if st.session_state.get("fitting_draft_subject") or st.session_state.get("fitting_draft_body"):
-        st.text_input(
-            "Subject",
-            value=st.session_state.get("fitting_draft_subject", ""),
-            key="fitting_draft_subject_field",
-        )
-        st.text_area(
-            "Body",
-            value=st.session_state.get("fitting_draft_body", ""),
-            height=260,
-            key="fitting_draft_body_field",
-        )
-        st.caption(
-            "To send, head to **Send to Factory** — copy the subject/body across, and the "
-            "test-mode redirect still applies."
-        )
+    st.markdown("##### 4 · Hand off")
+    st.caption(
+        "Fit results are recorded on the tech pack (change log + revised measurements). "
+        "Email drafting and sending live in the Send stage — no duplicate flows."
+    )
+    if st.button("Continue → ④ Send to Factory", key="fitting_continue_send_btn"):
+        _go("send")
 
 
 def _render_paste_notes_tab(tech_pack: dict[str, Any]) -> None:
@@ -1647,6 +1670,8 @@ def _render_paste_notes_tab(tech_pack: dict[str, Any]) -> None:
 
     if st.session_state.get("last_fitting_summary"):
         st.success(st.session_state.last_fitting_summary)
+        if st.button("Continue → ④ Send to Factory", key="paste_continue_send_btn"):
+            _go("send")
 
     tech_pack = st.session_state.tech_pack
 
@@ -1663,11 +1688,15 @@ def section_fitting_notes() -> None:
         st.info("Generate a tech pack first.", icon="ℹ️")
         return
 
-    tabs = st.tabs([f"Fitting Room  {LIVE_BADGE}", f"Paste Notes  {LIVE_BADGE}"])
+    st.markdown(
+        "Bring fit-session results back into the spec. **Paste Notes** is the everyday "
+        "path; the **Fitting Room** handles a full session transcript with photos."
+    )
+    tabs = st.tabs([f"Paste Notes  {LIVE_BADGE}", f"Fitting Room  {LIVE_BADGE}"])
     with tabs[0]:
-        _render_fitting_room_live(tech_pack)
-    with tabs[1]:
         _render_paste_notes_tab(tech_pack)
+    with tabs[1]:
+        _render_fitting_room_live(tech_pack)
 
 
 def section_send_to_factory() -> None:
@@ -1715,11 +1744,49 @@ def section_send_to_factory() -> None:
         "Thanks,\nSpecBot demo"
     )
 
+    with st.expander("AI-draft the email from the latest fit session"):
+        has_openai = bool(os.getenv("OPENAI_API_KEY"))
+        if not has_openai:
+            st.caption("Requires OPENAI_API_KEY.")
+        change_log = tech_pack.get("change_log", []) or []
+        st.caption(
+            f"Uses the last {min(len(change_log), 10)} change-log entries"
+            + (" and the fitting-room transcript." if st.session_state.get("fitting_transcript") else ".")
+        )
+        if st.button("Draft email with AI", key="send_ai_draft_btn", disabled=not has_openai):
+            structured = [
+                {
+                    "pom": e.get("pom", ""),
+                    "delta": e.get("new_value", ""),
+                    "reason": e.get("reason", ""),
+                }
+                for e in change_log[-10:]
+            ]
+            with st.spinner("Drafting…"):
+                try:
+                    from gpt_service import draft_fitting_email
+
+                    draft = draft_fitting_email(
+                        tech_pack,
+                        st.session_state.get("fitting_transcript", ""),
+                        structured,
+                        tech_pack.get("fit_photos") or [],
+                        factory_name=factory["factory_name"],
+                        contact_name=contact["name"],
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    st.error(f"Drafting failed: {exc}")
+                    draft = None
+            if draft:
+                st.session_state.fitting_draft_subject = draft["subject"]
+                st.session_state.fitting_draft_body = draft["body"]
+                st.rerun()
+
     fitting_draft_body = st.session_state.get("fitting_draft_body") or ""
     fitting_draft_subject = st.session_state.get("fitting_draft_subject") or ""
     if fitting_draft_body:
         if st.checkbox(
-            "Use fitting-room draft as the email body",
+            "Use the AI draft as the email body",
             key="use_fitting_draft",
             value=False,
         ):
@@ -1756,10 +1823,6 @@ def section_send_to_factory() -> None:
         st.session_state.last_email_result = result
 
         if result.get("ok"):
-            st.success(
-                f"Test email sent via {result.get('transport')} to "
-                f"{os.getenv('TEST_EMAIL_RECIPIENT')} (intended: {contact['email']})."
-            )
             try:
                 add_or_update_wip_record(
                     {
@@ -1774,7 +1837,14 @@ def section_send_to_factory() -> None:
                     }
                 )
             except Exception as exc:  # noqa: BLE001
-                st.warning(f"Email sent but WIP record update failed: {exc}")
+                _flash("warning", f"Email sent but WIP record update failed: {exc}")
+            _flash(
+                "success",
+                f"Test email sent via {result.get('transport')} to "
+                f"{os.getenv('TEST_EMAIL_RECIPIENT')} (intended: {contact['email']}). "
+                "Status updated to Sent to Factory.",
+            )
+            _go("wip")
         else:
             st.error(f"Email failed: {result.get('error')}")
 
@@ -1825,28 +1895,33 @@ def main() -> None:
     _hero()
     _status_strip()
 
-    nav = st.tabs(
-        [
-            f"Brand Library  {LIVE_BADGE}",
-            "Style Setup",
-            "Tech Pack",
-            "Fitting",
-            "Send to Factory",
-            "WIP Dashboard",
-        ]
-    )
-    with nav[0]:
-        section_brand_library()
-    with nav[1]:
+    _render_flashes()
+
+    stage = st.session_state.get("nav_stage", "intake")
+    has_style = bool(st.session_state.tech_pack.get("style_number"))
+
+    if stage in ("techpack", "fit", "send") and not has_style:
+        st.info(
+            f"**{_STAGE_LABELS[stage]}** needs a style in progress. "
+            "Start at Style Intake — generate from a sketch, or load the demo style."
+        )
+        if st.button("← Go to Style Intake", key="goto_intake_btn"):
+            _go("intake")
+        return
+
+    st.markdown(f"## {_STAGE_LABELS[stage]}")
+    if stage == "intake":
         section_style_setup()
-    with nav[2]:
+    elif stage == "techpack":
         section_tech_pack_preview()
-    with nav[3]:
+    elif stage == "fit":
         section_fitting_notes()
-    with nav[4]:
+    elif stage == "send":
         section_send_to_factory()
-    with nav[5]:
+    elif stage == "wip":
         section_wip_dashboard()
+    elif stage == "library":
+        section_brand_library()
 
     st.divider()
     st.caption(
