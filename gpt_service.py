@@ -69,6 +69,10 @@ JSON_SCHEMA_HINT = {
             "component": "e.g. Self fabric, Main label, Care label, Buttons",
             "material": "material spec — include brand library code (FBR-/TRM-) if applicable",
             "placement": "where it goes",
+            "quantity": "consumption/qty per garment, or empty if unknown",
+            "uom": "yd | m | pcs | gross, or empty",
+            "supplier": "supplier or article number if known from brand library, else empty",
+            "color": "color / DTM instruction, or empty",
             "notes": "string",
             "source": _SOURCE_VALUES,
         }

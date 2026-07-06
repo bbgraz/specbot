@@ -195,6 +195,37 @@ def t_fit_empty():
     assert revised == SAMPLE_TP
 check("Fitting notes: empty input is a no-op", t_fit_empty)
 
+def t_fit_fractions():
+    from fit_update_service import apply_fitting_notes, _parse_amount
+    assert _parse_amount("3/8") == 0.375
+    assert _parse_amount("1 1/2") == 1.5
+    assert _parse_amount("½") == 0.5
+    assert _parse_amount('1/4"') == 0.25
+    notes = 'let out chest 1/2\nRaise armhole depth 1/4"\nshorten sleeve length by 3/8'
+    revised = apply_fitting_notes(copy.deepcopy(SAMPLE_TP), notes)
+    m = {r["pom"]: r["target"] for r in revised["measurements"]}
+    assert m["Chest Width"] == "21.5", m
+    assert m["Armhole Depth"] == "9.75", m
+    assert m["Sleeve Length"] == "7.875", m   # 8.25 - 0.375; the old parser read 3/8 as 3
+check("Fitting notes: fractions parse correctly (1/2, 1/4\", 3/8, no 'by' needed)", t_fit_fractions)
+
+def t_fit_plausibility_cap():
+    from fit_update_service import apply_fitting_notes
+    revised = apply_fitting_notes(copy.deepcopy(SAMPLE_TP), "shorten sleeve length by 5")
+    m = {r["pom"]: r["target"] for r in revised["measurements"]}
+    assert m["Sleeve Length"] == "8.25", "implausible delta must not be applied"
+    assert any("NOT APPLIED" in e["reason"] for e in revised["change_log"])
+check("Fitting notes: implausible delta blocked, flagged NOT APPLIED", t_fit_plausibility_cap)
+
+def t_fit_no_silent_drops():
+    from fit_update_service import apply_fitting_notes
+    notes = "raise armhole depth by 0.25\nmove grainline 3 degrees on sleeve panel"
+    revised = apply_fitting_notes(copy.deepcopy(SAMPLE_TP), notes)
+    reasons = " | ".join(e["reason"] for e in revised["change_log"])
+    assert "grainline" in reasons and "could not parse" in reasons, reasons
+    assert len(revised["change_log"]) == 2  # one applied + one unparsed, zero silent
+check("Fitting notes: unparseable actionable lines logged, never dropped", t_fit_no_silent_drops)
+
 
 # ---------------------------------------------------------------- excel export
 def t_excel():
@@ -221,6 +252,40 @@ def t_excel():
     assert cl_rows[0][4] == "9.5" and cl_rows[0][5] == "10"
     globals()["_EXPORT_PATH"] = path
 check("Excel export: 6 sheets, headers, frozen rows, revised values, change log", t_excel)
+
+
+def t_excel_sketch_and_rev():
+    from excel_exporter import export_tech_pack_to_excel
+    from PIL import Image
+    import io
+    img = Image.new("RGB", (600, 400), "white")
+    buf = io.BytesIO(); img.save(buf, format="JPEG")
+    tp = copy.deepcopy(SAMPLE_TP); tp["rev"] = 2
+    path = export_tech_pack_to_excel(tp, sketch_bytes=buf.getvalue())
+    assert "_rev2_" in Path(path).name
+    from openpyxl import load_workbook
+    wb = load_workbook(path)
+    assert len(wb["Cover"]._images) == 1, "sketch must be embedded on Cover"
+    bom = wb["BOM"]
+    headers = [c.value for c in bom[5]]
+    assert "Qty/Consumption" in headers and "Supplier / Article #" in headers
+check("Excel: sketch embedded on Cover, rev in filename, full BOM columns", t_excel_sketch_and_rev)
+
+def t_grading_sanity():
+    from mock_data import build_graded_table, NUMERIC_SIZE_RUN
+    meas = [
+        {"pom": "Neck Rib Height", "target": "0.75"},
+        {"pom": "Chest Width", "target": "21"},
+        {"pom": "Waist Width", "target": "16.5"},
+    ]
+    rows = build_graded_table(meas, sample_size="M")
+    rib = next(r for r in rows if r["POM"] == "Neck Rib Height")
+    assert rib["XS"] == "0.75" and rib["XXL"] == "0.75", "trim heights must not grade"
+    assert all(float(v) >= 0 for r in rows for k, v in r.items() if k not in ("POM", "Grade rule (in)"))
+    num = build_graded_table(meas, sample_size="32", size_run=NUMERIC_SIZE_RUN)
+    waist = next(r for r in num if r["POM"] == "Waist Width")
+    assert waist["32"] == "16.5" and waist["34"] == "17.5", waist
+check("Grading: zero-grade trims, floor at 0, numeric run for bottoms", t_grading_sanity)
 
 
 # ---------------------------------------------------------------- wip store
@@ -362,6 +427,35 @@ def t_ui_load_demo():
     assert len(tp["measurements"]) >= 10 and tp["bom"] and tp["construction_notes"]
     assert tp["assumptions"] and tp["missing_information"]
 check("UI: Load Demo Tech Pack populates a full tech pack offline", t_ui_load_demo)
+
+
+def t_ui_preview_apply_flow():
+    from streamlit.testing.v1 import AppTest
+    at = AppTest.from_file(str(APP_DIR / "app.py"), default_timeout=60)
+    at.run()
+    demo = [b for b in at.button if "Demo" in (b.label or "")]
+    demo[0].click().run()
+    at.text_area(key="fitting_notes_input").set_value("raise armhole depth by 1/4\nshorten body length by 40")
+    preview = [b for b in at.button if b.key == "preview_fitting_btn"]
+    assert preview, "Preview Changes button not found"
+    preview[0].click().run()
+    assert len(at.exception) == 0
+    # nothing applied yet
+    tp = at.session_state["tech_pack"]
+    armhole = next(m for m in tp["measurements"] if m["pom"] == "Armhole Depth")
+    assert armhole["target"] == "9.5", "preview must not mutate the tech pack"
+    apply_btn = [b for b in at.button if b.key == "apply_fitting_btn"]
+    assert apply_btn, "Apply button should appear after preview"
+    apply_btn[0].click().run()
+    assert len(at.exception) == 0
+    tp = at.session_state["tech_pack"]
+    armhole = next(m for m in tp["measurements"] if m["pom"] == "Armhole Depth")
+    assert armhole["target"] == "9.75"
+    body = next(m for m in tp["measurements"] if m["pom"] == "Body Length from HPS")
+    assert body["target"] == "28.5", "implausible 40in change must be blocked"
+    assert tp["rev"] == 1 and tp["measurement_history"], "rev + snapshot recorded"
+    assert all(e.get("stage") for e in tp["change_log"]), "stage stamped on entries"
+check("UI: preview shows diff without mutating; apply commits rev + snapshot", t_ui_preview_apply_flow)
 
 
 # ---------------------------------------------------------------- report

@@ -22,14 +22,59 @@ def _now_iso() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+_UNICODE_FRACTIONS = {
+    "¼": 0.25, "½": 0.5, "¾": 0.75,
+    "⅛": 0.125, "⅜": 0.375, "⅝": 0.625, "⅞": 0.875,
+}
+
+# Matches: 1.25 | 3/8 | 1 1/2 | 1-1/2 | ½ | 1½   (fit comments are written in fractions)
+_AMOUNT_RE = r"(?:\d+(?:\.\d+)?\s*[\-\s]\s*\d+\s*/\s*\d+|\d+\s*/\s*\d+|\d+(?:\.\d+)?[¼½¾⅛⅜⅝⅞]?|[¼½¾⅛⅜⅝⅞])"
+
+
+def _parse_amount(text: str) -> float | None:
+    """Parse a measurement amount: decimals, fractions, mixed numbers, unicode fractions."""
+    if text is None:
+        return None
+    t = str(text).strip().rstrip('"”″in').strip()
+    sign = 1.0
+    if t.startswith("-"):
+        sign, t = -1.0, t[1:].strip()
+    elif t.startswith("+"):
+        t = t[1:].strip()
+
+    frac_extra = 0.0
+    if t and t[-1] in _UNICODE_FRACTIONS:
+        frac_extra = _UNICODE_FRACTIONS[t[-1]]
+        t = t[:-1].strip()
+        if not t:
+            return sign * frac_extra
+
+    # mixed number: "1 1/2" or "1-1/2"
+    m = re.fullmatch(r"(\d+(?:\.\d+)?)\s*[\-\s]\s*(\d+)\s*/\s*(\d+)", t)
+    if m:
+        whole, num, den = float(m.group(1)), float(m.group(2)), float(m.group(3))
+        return sign * (whole + (num / den if den else 0.0))
+    # plain fraction: "3/8"
+    m = re.fullmatch(r"(\d+)\s*/\s*(\d+)", t)
+    if m:
+        num, den = float(m.group(1)), float(m.group(2))
+        return sign * (num / den) if den else None
+    # decimal / integer (with optional unicode fraction suffix, e.g. "1½")
+    m = re.fullmatch(r"\d+(?:\.\d+)?", t)
+    if m:
+        return sign * (float(m.group(0)) + frac_extra)
+    return None
+
+
 def _parse_number(text: str) -> float | None:
-    match = re.search(r"-?\d+(?:\.\d+)?", text)
+    """Extract the first amount (fraction-aware) from freeform text."""
+    direct = _parse_amount(text)
+    if direct is not None:
+        return direct
+    match = re.search(rf"-?{_AMOUNT_RE}", str(text))
     if not match:
         return None
-    try:
-        return float(match.group(0))
-    except ValueError:
-        return None
+    return _parse_amount(match.group(0))
 
 
 def _format_number(value: float) -> str:
@@ -77,26 +122,55 @@ def _add_change_log(
 # Rule-based fallback parser
 # ---------------------------------------------------------------------------
 
+_VERBS = (
+    r"raise|lower|increase|decrease|reduce|add|drop|let out|take in|shorten|"
+    r"lengthen|extend|open up|widen|narrow|slim"
+)
+_POM_RE = r"[A-Za-z][A-Za-z \-/]+?"
+_UNIT_RE = r"(?:\s*(?:\"|”|″|in\b|inch(?:es)?\b))?"
+
 _RULE_PATTERNS = [
-    # "raise armhole by 0.5"
+    # "raise armhole by 0.5" / "shorten sleeve length 3/8" (with or without "by")
     re.compile(
-        r"(?P<verb>raise|lower|increase|decrease|reduce|add|drop|let out|take in|shorten|lengthen)\s+"
-        r"(?P<pom>[A-Za-z][A-Za-z \-/]+?)\s+by\s+(?P<amount>-?\d+(?:\.\d+)?)",
+        rf"(?P<verb>{_VERBS})\s+(?:the\s+)?(?P<pom>{_POM_RE})\s+(?:by\s+)?(?P<amount>{_AMOUNT_RE}){_UNIT_RE}",
         re.IGNORECASE,
     ),
-    # "armhole +0.5" / "chest -0.25"
+    # "add 1/2 to chest" / "take in 0.25 at waist"
     re.compile(
-        r"(?P<pom>[A-Za-z][A-Za-z \-/]+?)\s+(?P<sign>[+\-])\s*(?P<amount>\d+(?:\.\d+)?)",
+        rf"(?P<verb>{_VERBS})\s+(?P<amount>{_AMOUNT_RE}){_UNIT_RE}\s+(?:to|at|on|from)\s+(?:the\s+)?(?P<pom>{_POM_RE})\s*$",
+        re.IGNORECASE,
+    ),
+    # "armhole +0.5" / "chest -1/4"
+    re.compile(
+        rf"(?P<pom>{_POM_RE})\s*(?P<sign>[+\-])\s*(?P<amount>{_AMOUNT_RE}){_UNIT_RE}",
         re.IGNORECASE,
     ),
     # "set chest to 20" / "chest = 20"
     re.compile(
-        r"(?:set\s+)?(?P<pom>[A-Za-z][A-Za-z \-/]+?)\s+(?:to|=)\s+(?P<amount>-?\d+(?:\.\d+)?)",
+        rf"(?:set\s+)?(?P<pom>{_POM_RE})\s+(?:to|=)\s+(?P<amount>{_AMOUNT_RE}){_UNIT_RE}",
         re.IGNORECASE,
     ),
 ]
 
-_NEGATIVE_VERBS = {"lower", "decrease", "reduce", "drop", "take in", "shorten"}
+_NEGATIVE_VERBS = {"lower", "decrease", "reduce", "drop", "take in", "shorten", "narrow", "slim"}
+
+# A line that mentions one of these (or contains a number) but produced no update
+# is surfaced in the change log instead of being silently dropped.
+_ACTIONABLE_HINT = re.compile(
+    rf"(?:{_VERBS}|grade|move|adjust|[+\-]\s*{_AMOUNT_RE}|\d|[¼½¾⅛⅜⅝⅞])", re.IGNORECASE
+)
+
+_POM_STOPWORDS = ("the ", "at ", "on ", "front of ", "back of ")
+
+
+def _clean_pom(pom: str) -> str:
+    p = pom.strip()
+    lowered = p.lower()
+    for stop in _POM_STOPWORDS:
+        if lowered.startswith(stop):
+            p = p[len(stop):]
+            lowered = p.lower()
+    return p.strip()
 
 
 def _split_statements(text: str) -> list[str]:
@@ -109,19 +183,27 @@ def _split_statements(text: str) -> list[str]:
     return [p.strip() for p in parts if p and p.strip()]
 
 
-def _rule_based_updates(fitting_notes: str) -> list[dict[str, Any]]:
-    """Tiny parser used when OPENAI_API_KEY isn't set."""
+def _rule_based_updates(fitting_notes: str) -> tuple[list[dict[str, Any]], list[str]]:
+    """Fraction-aware parser used when OPENAI_API_KEY isn't set.
+
+    Returns (updates, unparsed_lines). Lines that look actionable (contain a
+    number or a change verb) but produce no update are returned so the caller
+    can surface them — a dropped fit comment must never be silent.
+    """
     updates: list[dict[str, Any]] = []
+    unparsed: list[str] = []
     for line in _split_statements(fitting_notes):
+        matched = False
         for pattern in _RULE_PATTERNS:
             match = pattern.search(line)
             if not match:
                 continue
             groups = match.groupdict()
-            pom = groups.get("pom", "").strip()
-            amount = _parse_number(groups.get("amount", ""))
+            pom = _clean_pom(groups.get("pom", ""))
+            amount = _parse_amount(groups.get("amount", ""))
             if not pom or amount is None:
                 continue
+            matched = True
 
             if "verb" in groups and groups["verb"]:
                 verb = groups["verb"].lower()
@@ -163,7 +245,9 @@ def _rule_based_updates(fitting_notes: str) -> list[dict[str, Any]]:
                     }
                 )
             break  # one update per line
-    return updates
+        if not matched and _ACTIONABLE_HINT.search(line):
+            unparsed.append(line)
+    return updates, unparsed
 
 
 # ---------------------------------------------------------------------------
@@ -216,8 +300,22 @@ def _apply_update(tech_pack: dict[str, Any], update: dict[str, Any]) -> None:
         delta = _parse_number(str(update["delta"]))
         baseline = _parse_number(str(row.get("target", "")))
         if delta is not None and baseline is not None:
+            # Plausibility cap: a fit adjustment rarely moves a POM by more
+            # than ~30% of itself. Flag instead of silently corrupting the spec.
+            if baseline > 0 and abs(delta) >= 0.75 and abs(delta) > 0.3 * baseline:
+                _add_change_log(
+                    tech_pack,
+                    row["pom"],
+                    "target",
+                    str(row.get("target", "")),
+                    str(row.get("target", "")),
+                    f"NOT APPLIED — delta {_format_number(delta)}\" is "
+                    f">{0.3:.0%} of current {_format_number(baseline)}\"; "
+                    f"review and apply manually if intended. Note: {reason}",
+                )
+                return
             old = row.get("target", "")
-            new_value = _format_number(baseline + delta)
+            new_value = _format_number(max(0.0, baseline + delta))
             row["target"] = new_value
             _add_change_log(
                 tech_pack,
@@ -225,7 +323,7 @@ def _apply_update(tech_pack: dict[str, Any], update: dict[str, Any]) -> None:
                 "target",
                 str(old),
                 str(new_value),
-                f"{reason} (delta {update['delta']})",
+                f"{reason} (delta {_format_number(delta)})",
             )
         else:
             _add_change_log(
@@ -266,6 +364,7 @@ def apply_fitting_notes(
     revised = copy.deepcopy(tech_pack)
 
     updates: list[dict[str, Any]] = []
+    unparsed: list[str] = []
     use_gpt = bool(os.getenv("OPENAI_API_KEY"))
     if use_gpt:
         try:
@@ -277,11 +376,21 @@ def apply_fitting_notes(
             revised.setdefault("missing_information", []).append(
                 f"GPT fitting-note interpretation failed ({exc}). Used rule-based fallback."
             )
-            updates = _rule_based_updates(fitting_notes)
+            updates, unparsed = _rule_based_updates(fitting_notes)
     else:
-        updates = _rule_based_updates(fitting_notes)
+        updates, unparsed = _rule_based_updates(fitting_notes)
 
-    if not updates:
+    for line in unparsed:
+        _add_change_log(
+            revised,
+            "(unparsed)",
+            "note",
+            "",
+            "",
+            f"NOT APPLIED — could not parse fitting note, review manually: {line}",
+        )
+
+    if not updates and not unparsed:
         _add_change_log(
             revised,
             "(unmatched)",

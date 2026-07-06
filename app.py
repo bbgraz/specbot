@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import json
 import os
 from datetime import datetime
@@ -37,6 +38,7 @@ from mock_data import (
     MOCK_FACTORY_PROFILES,
     MOCK_FITTING_TRANSCRIPT,
     MOCK_REVISIONS,
+    NUMERIC_SIZE_RUN,
     SAMPLE_STAGES,
     build_graded_table,
 )
@@ -46,7 +48,7 @@ from tech_pack_store import (
     load_tech_pack,
     save_tech_pack,
 )
-from spec_blocks import build_offline_draft
+from spec_blocks import build_offline_draft, match_category
 from wip_store import add_or_update_wip_record, load_wip_records
 
 load_dotenv()
@@ -133,6 +135,10 @@ def _to_tech_pack(analysis: dict[str, Any], metadata: dict[str, Any]) -> dict[st
                 "component": item.get("component", ""),
                 "material": item.get("material", ""),
                 "placement": item.get("placement", ""),
+                "quantity": item.get("quantity", ""),
+                "uom": item.get("uom", ""),
+                "supplier": item.get("supplier", ""),
+                "color": item.get("color", ""),
                 "notes": item.get("notes", ""),
                 "source": item.get("source", ""),
             }
@@ -186,11 +192,29 @@ def _measurements_df(tech_pack: dict[str, Any]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+_BOM_COLUMNS = [
+    "component", "material", "placement", "quantity", "uom",
+    "supplier", "color", "notes", "source",
+]
+
+
 def _bom_df(tech_pack: dict[str, Any]) -> pd.DataFrame:
-    rows = tech_pack.get("bom", [])
+    rows = [
+        {col: r.get(col, "") for col in _BOM_COLUMNS}
+        for r in tech_pack.get("bom", [])
+    ]
     if not rows:
-        return pd.DataFrame(columns=["component", "material", "placement", "notes", "source"])
-    return pd.DataFrame(rows)
+        return pd.DataFrame(columns=_BOM_COLUMNS)
+    return pd.DataFrame(rows, columns=_BOM_COLUMNS)
+
+
+def _df_to_bom(df: pd.DataFrame) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for _, row in df.iterrows():
+        item = {col: str(row.get(col, "") or "").strip() for col in _BOM_COLUMNS}
+        if any(item.values()):
+            out.append(item)
+    return out
 
 
 def _construction_df(tech_pack: dict[str, Any]) -> pd.DataFrame:
@@ -270,6 +294,29 @@ def _persist_current_tech_pack() -> None:
         pass
 
 
+def _commit_fit_revision(old_tp: dict[str, Any], revised: dict[str, Any], stage: str) -> None:
+    """Commit an approved fit revision: bump rev, snapshot prior measurements,
+    stamp the stage on new change-log entries, persist."""
+    prev_rev = int(old_tp.get("rev") or 0)
+    revised["rev"] = prev_rev + 1
+    revised["sample_stage"] = stage
+    history = list(old_tp.get("measurement_history") or [])
+    history.append(
+        {
+            "rev": prev_rev,
+            "stage": old_tp.get("sample_stage", ""),
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "measurements": copy.deepcopy(old_tp.get("measurements", [])),
+        }
+    )
+    revised["measurement_history"] = history
+    for entry in revised.get("change_log", [])[len(old_tp.get("change_log", [])) :]:
+        entry.setdefault("stage", stage)
+    st.session_state.tech_pack = revised
+    st.session_state.export_path = None
+    _persist_current_tech_pack()
+
+
 # ---------------------------------------------------------------------------
 # State
 # ---------------------------------------------------------------------------
@@ -280,6 +327,7 @@ def _init_state() -> None:
     st.session_state.setdefault("export_path", None)
     st.session_state.setdefault("last_email_result", None)
     st.session_state.setdefault("last_fitting_summary", None)
+    st.session_state.setdefault("pending_fit", None)
     st.session_state.setdefault("uploaded_sketch_bytes", None)
     st.session_state.setdefault("uploaded_sketch_mime", None)
     st.session_state.setdefault("fitting_demo_played", False)
@@ -892,10 +940,22 @@ def _tab_grading(tech_pack: dict[str, Any]) -> None:
         _persist_current_tech_pack()
 
     st.markdown("**Graded size run**")
+    category = match_category(tech_pack.get("garment_type") or "")
+    default_run = "Numeric (28–38)" if category in ("pants", "shorts") else "Alpha (XS–XXL)"
+    run_options = ["Alpha (XS–XXL)", "Numeric (28–38)"]
+    run_choice = st.radio(
+        "Size run",
+        run_options,
+        index=run_options.index(default_run),
+        horizontal=True,
+        key="grading_size_run",
+        help="Bottoms grade on waist sizes; tops and dresses on alpha sizes.",
+    )
+    size_run = NUMERIC_SIZE_RUN if run_choice.startswith("Numeric") else DEFAULT_SIZE_RUN
     rows = build_graded_table(
         measurements,
         sample_size=sample_size,
-        size_run=DEFAULT_SIZE_RUN,
+        size_run=size_run,
         rule_overrides=new_rules,
     )
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
@@ -952,8 +1012,32 @@ def _tab_construction(tech_pack: dict[str, Any]) -> None:
 
 
 def _tab_bom(tech_pack: dict[str, Any]) -> None:
-    st.caption(f"{LIVE_BADGE}. Self fabric, trims, labels, packaging.")
-    st.dataframe(_bom_df(tech_pack), use_container_width=True, hide_index=True)
+    st.caption(
+        f"{LIVE_BADGE}. Self fabric, trims, labels, packaging — editable, with "
+        "consumption, supplier, and color/DTM so the factory can cost and source."
+    )
+    edited = st.data_editor(
+        _bom_df(tech_pack),
+        num_rows="dynamic",
+        use_container_width=True,
+        hide_index=True,
+        key="bom_editor",
+        column_config={
+            "component": st.column_config.TextColumn("Component"),
+            "material": st.column_config.TextColumn("Material"),
+            "placement": st.column_config.TextColumn("Placement"),
+            "quantity": st.column_config.TextColumn("Qty/Consumption", help="e.g. 1.65 yd, 3 pcs"),
+            "uom": st.column_config.TextColumn("UOM", help="yd, m, pcs, gross"),
+            "supplier": st.column_config.TextColumn("Supplier / Article #"),
+            "color": st.column_config.TextColumn("Color / DTM"),
+            "notes": st.column_config.TextColumn("Notes"),
+            "source": st.column_config.TextColumn("Source"),
+        },
+    )
+    new_bom = _df_to_bom(edited)
+    if new_bom != tech_pack.get("bom"):
+        tech_pack["bom"] = new_bom
+        _persist_current_tech_pack()
 
 
 def _tab_costing(tech_pack: dict[str, Any]) -> None:
@@ -1047,16 +1131,55 @@ def _tab_annotations(tech_pack: dict[str, Any]) -> None:
 
 
 def _tab_revisions(tech_pack: dict[str, Any]) -> None:
-    _preview_banner(
-        "Full revision history with side-by-side diff (POMs, BOM, construction). "
-        "Today this tab shows static demo revisions."
+    history = tech_pack.get("measurement_history") or []
+    if not history:
+        _preview_banner(
+            "Revision history appears here after the first applied fit round. "
+            "The demo rows below show the intended shape."
+        )
+        df = pd.DataFrame(MOCK_REVISIONS)
+        df.columns = ["Rev", "Date", "Author", "Stage", "Summary"]
+        st.dataframe(df, use_container_width=True, hide_index=True)
+        return
+
+    st.caption(
+        f"{LIVE_BADGE}. Current rev: **{tech_pack.get('rev', 0)}** "
+        f"({tech_pack.get('sample_stage', '')}). Side-by-side vs the previous rev below."
     )
-    df = pd.DataFrame(MOCK_REVISIONS)
-    df.columns = ["Rev", "Date", "Author", "Stage", "Summary"]
-    st.dataframe(df, use_container_width=True, hide_index=True)
-    cols = st.columns(2)
-    cols[0].button("Compare Rev 2 ↔ Rev 3", disabled=True, help="Preview only.")
-    cols[1].button("Restore Rev 1", disabled=True, help="Preview only.")
+    rev_rows = [
+        {
+            "Rev": h.get("rev", i),
+            "Stage": h.get("stage", ""),
+            "Saved": h.get("timestamp", ""),
+            "POMs": len(h.get("measurements", [])),
+        }
+        for i, h in enumerate(history)
+    ]
+    st.dataframe(pd.DataFrame(rev_rows), use_container_width=True, hide_index=True)
+
+    prev = history[-1]
+    prev_by_pom = {m.get("pom", ""): m.get("target", "") for m in prev.get("measurements", [])}
+    diff_rows = []
+    for m in tech_pack.get("measurements", []) or []:
+        pom = m.get("pom", "")
+        old_t = prev_by_pom.pop(pom, None)
+        new_t = m.get("target", "")
+        if old_t is None:
+            diff_rows.append({"POM": pom, f"Rev {prev.get('rev', '')}": "(new row)", f"Rev {tech_pack.get('rev', 0)} (current)": new_t, "Δ": ""})
+        elif str(old_t) != str(new_t):
+            try:
+                delta = f"{float(new_t) - float(old_t):+g}"
+            except (TypeError, ValueError):
+                delta = ""
+            diff_rows.append({"POM": pom, f"Rev {prev.get('rev', '')}": old_t, f"Rev {tech_pack.get('rev', 0)} (current)": new_t, "Δ": delta})
+    for pom, old_t in prev_by_pom.items():
+        diff_rows.append({"POM": pom, f"Rev {prev.get('rev', '')}": old_t, f"Rev {tech_pack.get('rev', 0)} (current)": "(removed)", "Δ": ""})
+
+    st.markdown(f"**Changed POMs — Rev {prev.get('rev', '')} → Rev {tech_pack.get('rev', 0)}**")
+    if diff_rows:
+        st.dataframe(pd.DataFrame(diff_rows), use_container_width=True, hide_index=True)
+    else:
+        st.info("No measurement changes between the last two revs.")
 
 
 def _tab_assumptions(tech_pack: dict[str, Any]) -> None:
@@ -1116,7 +1239,9 @@ def section_tech_pack_preview() -> None:
     with cols[0]:
         if st.button("Export Excel", key="export_btn"):
             try:
-                path = export_tech_pack_to_excel(tech_pack)
+                path = export_tech_pack_to_excel(
+                    tech_pack, sketch_bytes=st.session_state.get("uploaded_sketch_bytes")
+                )
             except Exception as exc:  # noqa: BLE001
                 st.error(f"Excel export failed: {exc}")
                 return
@@ -1268,12 +1393,11 @@ def _render_fitting_room_live(tech_pack: dict[str, Any]) -> None:
             with st.spinner("Reading the transcript…"):
                 revised = apply_fitting_notes(tech_pack, transcript)
             new_entries = revised.get("change_log", [])[len(tech_pack.get("change_log", [])) :]
-            for entry in new_entries:
-                entry.setdefault("stage", tech_pack.get("sample_stage", DEFAULT_STAGE))
             revised["fit_photos"] = pinned
-            st.session_state.tech_pack = revised
+            _commit_fit_revision(
+                tech_pack, revised, tech_pack.get("sample_stage", DEFAULT_STAGE)
+            )
             st.session_state.fitting_change_count = len(new_entries)
-            _persist_current_tech_pack()
             st.success(f"{len(new_entries)} change-log entries added from the transcript.")
 
     if st.session_state.get("fitting_change_count"):
@@ -1390,23 +1514,57 @@ def _render_paste_notes_tab(tech_pack: dict[str, Any]) -> None:
             help="Upload fit photos with markup. Roadmap.",
         )
 
-    if st.button("Update Tech Pack", key="apply_fitting_btn"):
+    if st.button("Preview Changes", key="preview_fitting_btn", type="primary"):
         if not notes.strip():
             st.warning("Enter fitting notes first.")
         else:
-            with st.spinner("Applying fitting notes…"):
+            with st.spinner("Parsing fitting notes…"):
                 revised = apply_fitting_notes(tech_pack, notes)
-            revised["sample_stage"] = new_stage
-            for entry in revised.get("change_log", [])[len(tech_pack.get("change_log", [])):]:
-                entry.setdefault("stage", new_stage)
-            st.session_state.tech_pack = revised
-            st.session_state.last_fitting_summary = (
-                f"{len(revised.get('change_log', [])) - len(tech_pack.get('change_log', []))} "
-                f"change-log entries added (anchored to {new_stage})."
+            st.session_state.pending_fit = {
+                "revised": revised,
+                "stage": new_stage,
+                "n_old": len(tech_pack.get("change_log", [])),
+            }
+
+    pending = st.session_state.get("pending_fit")
+    if pending:
+        new_entries = pending["revised"].get("change_log", [])[pending["n_old"] :]
+        applied = [
+            e for e in new_entries if not str(e.get("reason", "")).startswith("NOT APPLIED")
+        ]
+        flagged = [e for e in new_entries if str(e.get("reason", "")).startswith("NOT APPLIED")]
+
+        st.markdown("**Proposed changes — nothing is saved until you click Apply**")
+        if applied:
+            st.dataframe(
+                pd.DataFrame(applied)[["pom", "field", "old_value", "new_value", "reason"]],
+                use_container_width=True,
+                hide_index=True,
             )
-            st.success(st.session_state.last_fitting_summary)
-            st.session_state.export_path = None
-            _persist_current_tech_pack()
+        else:
+            st.info("No applicable measurement changes were parsed from these notes.")
+        if flagged:
+            st.warning(f"{len(flagged)} note(s) could not be applied — review manually:")
+            for e in flagged:
+                st.markdown(f"- {e.get('reason', '')}")
+
+        col_apply, col_discard, _ = st.columns([1, 1, 3])
+        with col_apply:
+            if st.button("Apply Changes", key="apply_fitting_btn"):
+                _commit_fit_revision(tech_pack, pending["revised"], pending["stage"])
+                st.session_state.last_fitting_summary = (
+                    f"{len(applied)} change(s) applied, {len(flagged)} flagged for review "
+                    f"(rev {st.session_state.tech_pack.get('rev')}, stage {pending['stage']})."
+                )
+                st.session_state.pending_fit = None
+                st.rerun()
+        with col_discard:
+            if st.button("Discard", key="discard_fitting_btn"):
+                st.session_state.pending_fit = None
+                st.rerun()
+
+    if st.session_state.get("last_fitting_summary"):
+        st.success(st.session_state.last_fitting_summary)
 
     tech_pack = st.session_state.tech_pack
 
@@ -1498,7 +1656,9 @@ def section_send_to_factory() -> None:
         if not attachment or not Path(attachment).is_file():
             with st.spinner("Exporting Excel before sending…"):
                 try:
-                    attachment = export_tech_pack_to_excel(tech_pack)
+                    attachment = export_tech_pack_to_excel(
+                        tech_pack, sketch_bytes=st.session_state.get("uploaded_sketch_bytes")
+                    )
                     st.session_state.export_path = attachment
                 except Exception as exc:  # noqa: BLE001
                     st.error(f"Excel export failed: {exc}")

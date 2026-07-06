@@ -53,13 +53,41 @@ def _autosize(worksheet, headers: list[str], rows: list[list[Any]]) -> None:
         worksheet.set_column(col_idx, col_idx, min(max_len + 2, 60))
 
 
-def export_tech_pack_to_excel(tech_pack: dict[str, Any]) -> str:
-    """Export the tech pack to an Excel workbook. Returns the absolute file path."""
+def _prepare_sketch_png(sketch_bytes: bytes | None):
+    """Convert uploaded sketch bytes to (PNG BytesIO, scale) for embedding, or None."""
+    if not sketch_bytes:
+        return None
+    try:
+        import io
+
+        from PIL import Image
+
+        img = Image.open(io.BytesIO(sketch_bytes)).convert("RGB")
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        buf.seek(0)
+        scale = min(1.0, 420.0 / max(img.width, 1))
+        return buf, scale
+    except Exception:  # noqa: BLE001 - a bad image must never block the export
+        return None
+
+
+def export_tech_pack_to_excel(
+    tech_pack: dict[str, Any],
+    sketch_bytes: bytes | None = None,
+) -> str:
+    """Export the tech pack to an Excel workbook. Returns the absolute file path.
+
+    `sketch_bytes` (optional) is the uploaded sketch; when provided it is
+    embedded on the Cover sheet — a factory can't sew from prose alone.
+    """
     EXPORT_DIR.mkdir(parents=True, exist_ok=True)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     style_number = tech_pack.get("style_number") or "draft"
-    filename = f"techpack_{_safe_filename(style_number)}_{timestamp}.xlsx"
+    rev = tech_pack.get("rev")
+    rev_part = f"_rev{rev}" if rev else ""
+    filename = f"techpack_{_safe_filename(style_number)}{rev_part}_{timestamp}.xlsx"
     filepath = (EXPORT_DIR / filename).resolve()
 
     workbook = xlsxwriter.Workbook(str(filepath))
@@ -96,6 +124,24 @@ def export_tech_pack_to_excel(tech_pack: dict[str, Any]) -> str:
     cover.set_column(1, 1, 80)
     cover.freeze_panes(4, 0)
 
+    sketch = _prepare_sketch_png(sketch_bytes)
+    if sketch:
+        sketch_buf, sketch_scale = sketch
+        cover.write(next_row + 1, 0, "Sketch", label_fmt)
+        cover.insert_image(
+            next_row + 2,
+            0,
+            "sketch.png",
+            {"image_data": sketch_buf, "x_scale": sketch_scale, "y_scale": sketch_scale},
+        )
+    else:
+        cover.write(
+            next_row + 1,
+            0,
+            "Sketch: none embedded — attach the flat/sketch before sending to a factory.",
+            meta_fmt,
+        )
+
     # 2. Measurements
     meas_sheet = workbook.add_worksheet("Measurements")
     next_row = _write_header_band(meas_sheet, tech_pack, "Measurements", title_fmt, meta_fmt, generated_at)
@@ -123,7 +169,10 @@ def export_tech_pack_to_excel(tech_pack: dict[str, Any]) -> str:
     # 3. BOM
     bom_sheet = workbook.add_worksheet("BOM")
     next_row = _write_header_band(bom_sheet, tech_pack, "Bill of Materials", title_fmt, meta_fmt, generated_at)
-    bom_headers = ["Component", "Material", "Placement", "Notes", "Source"]
+    bom_headers = [
+        "Component", "Material", "Placement", "Qty/Consumption", "UOM",
+        "Supplier / Article #", "Color / DTM", "Notes", "Source",
+    ]
     for col, h in enumerate(bom_headers):
         bom_sheet.write(next_row, col, h, header_fmt)
     rows_for_size = []
@@ -133,6 +182,10 @@ def export_tech_pack_to_excel(tech_pack: dict[str, Any]) -> str:
             b.get("component", ""),
             b.get("material", ""),
             b.get("placement", ""),
+            b.get("quantity", ""),
+            b.get("uom", ""),
+            b.get("supplier", ""),
+            b.get("color", ""),
             b.get("notes", ""),
             b.get("source", ""),
         ]

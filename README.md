@@ -95,9 +95,16 @@ Health check is `/_stcore/health` (Streamlit's built-in endpoint).
 
 ### Notes / limits
 
-- **State is in-process.** A redeploy or autoscale will reset session
-  state and clear `wip_records.json` (since it's baked into the image).
-  Fine for a demo; not for shared-state production use.
+- **State survives redeploys only with a volume.** By default WIP records,
+  saved tech packs, and exports are written inside the container image and
+  are lost on every redeploy. To persist them on Railway:
+  1. Service → **Settings → Volumes → Add Volume**, mount path `/data`.
+  2. Add variables:
+     - `SPECBOT_WIP_PATH=/data/wip_records.json`
+     - `SPECBOT_TECHPACK_DIR=/data/tech_packs`
+     - `SPECBOT_EXPORT_DIR=/data/exports`
+  Session state (the in-browser working copy) still resets on redeploy;
+  reload saved styles from the sidebar picker.
 - **Single replica.** Don't scale > 1 — sessions are sticky to a process.
 - **WIP persistence is ephemeral on Railway.** If you need it to survive
   redeploys, attach a Railway Volume and mount it at

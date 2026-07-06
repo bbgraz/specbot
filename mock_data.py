@@ -76,21 +76,44 @@ CONSTRUCTION_ZONES: list[str] = [
 # Default grade rules in inches between adjacent sizes.  Realistic-ish for
 # tops; tech designer would override these per brand.
 DEFAULT_GRADE_RULES: dict[str, float] = {
+    # Trim/finish dimensions do NOT grade — a rib or band is the same height
+    # in every size. Zero-rules listed first so they win over broader keywords.
+    "rib height": 0.0,
+    "cuff height": 0.0,
+    "band height": 0.0,
+    "collar height": 0.0,
+    "placket width": 0.0,
+    "placket length": 0.0,
+    "strap width": 0.0,
+    "inseam": 0.0,
+    "collar length": 0.25,
     "chest": 1.0,
     "waist": 1.0,
     "hip": 1.0,
+    "hem sweep": 1.0,
+    "bottom": 1.0,
     "body length": 0.5,
     "back length": 0.5,
+    "front length": 0.5,
     "shoulder": 0.25,
+    "yoke": 0.25,
     "sleeve length": 0.25,
     "sleeve opening": 0.125,
     "neck width": 0.25,
     "neck drop": 0.125,
     "armhole": 0.25,
     "cuff opening": 0.125,
+    "thigh": 0.375,
+    "knee": 0.25,
+    "leg opening": 0.125,
+    "rise": 0.25,
+    "hood": 0.25,
 }
 
 DEFAULT_SIZE_RUN: list[str] = ["XS", "S", "M", "L", "XL", "XXL"]
+
+# Bottoms grade on numeric waist sizes, not alpha sizes.
+NUMERIC_SIZE_RUN: list[str] = ["28", "30", "32", "34", "36", "38"]
 
 
 def _grade_rule_for_pom(
@@ -114,7 +137,7 @@ def _grade_rule_for_pom(
     for keyword, rule in DEFAULT_GRADE_RULES.items():
         if keyword in name:
             return rule
-    return 0.5  # fallback
+    return 0.25  # conservative fallback — unknown POMs should under-grade, not over-grade
 
 
 def build_graded_table(
@@ -144,7 +167,7 @@ def build_graded_table(
         row = {"POM": m.get("pom", ""), "Grade rule (in)": f"±{rule:g}"}
         for i, size in enumerate(sizes):
             offset = (i - sample_idx) * rule
-            value = base + offset
+            value = max(0.0, base + offset)  # a measurement can never go negative
             row[size] = f"{value:g}"
         rows.append(row)
     return rows
