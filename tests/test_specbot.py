@@ -486,16 +486,30 @@ def t_ui_workflow_navigation():
     at = AppTest.from_file(str(APP_DIR / "app.py"), default_timeout=60)
     at.run()
     assert at.session_state["nav_stage"] == "intake", "app starts at Style Intake"
-    # gated stages redirect to intake when no style is loaded
+    # stepper buttons exist for every stage on the main canvas
+    for stage in ("intake", "techpack", "fit", "send", "wip", "library"):
+        assert [b for b in at.button if b.key == f"nav_btn_{stage}"], f"stepper missing {stage}"
+    # gated stages are disabled without a style, and the dispatch gate holds too
     for stage in ("techpack", "fit", "send"):
-        at.radio(key="nav_stage").set_value(stage).run()
+        btn = [b for b in at.button if b.key == f"nav_btn_{stage}"][0]
+        assert btn.disabled, f"{stage} should be disabled with no style"
+        btn.click().run()
         assert len(at.exception) == 0
         assert any("Style Intake" in str(i.value) for i in at.info), f"{stage} should be gated"
     # ungated stages render without a style
     for stage in ("wip", "library"):
-        at.radio(key="nav_stage").set_value(stage).run()
+        [b for b in at.button if b.key == f"nav_btn_{stage}"][0].click().run()
         assert len(at.exception) == 0
-check("UI: workflow nav — starts at Intake, gates stages, all stages render", t_ui_workflow_navigation)
+    # back-navigation: load demo (auto-advance to techpack), then step back to intake
+    at.button(key="nav_btn_intake").click().run()
+    [b for b in at.button if "Demo" in (b.label or "")][0].click().run()
+    assert at.session_state["nav_stage"] == "techpack"
+    assert [b for b in at.button if b.key == "back_btn_techpack"], "footer Back missing"
+    at.button(key="back_btn_techpack").click().run()
+    assert at.session_state["nav_stage"] == "intake", "Back must return to the previous stage"
+    at.button(key="nav_btn_techpack").click().run()
+    assert at.session_state["nav_stage"] == "techpack", "stepper forward works after back"
+check("UI: stepper nav — gating, back/forward navigation, all stages render", t_ui_workflow_navigation)
 
 def t_ui_preview_apply_flow():
     from streamlit.testing.v1 import AppTest
@@ -504,7 +518,7 @@ def t_ui_preview_apply_flow():
     demo = [b for b in at.button if "Demo" in (b.label or "")]
     demo[0].click().run()
     assert at.session_state["nav_stage"] == "techpack", "demo load should advance to Tech Pack"
-    at.radio(key="nav_stage").set_value("fit").run()
+    at.button(key="nav_btn_fit").click().run()
     at.text_area(key="fitting_notes_input").set_value("raise armhole depth by 1/4\nshorten body length by 40")
     preview = [b for b in at.button if b.key == "preview_fitting_btn"]
     assert preview, "Preview Changes button not found"

@@ -300,10 +300,83 @@ WORKFLOW_STAGES: list[tuple[str, str]] = [
 _STAGE_LABELS = dict(WORKFLOW_STAGES)
 
 
+_PROCESS_ORDER = ["intake", "techpack", "fit", "send", "wip"]
+_GATED_STAGES = ("techpack", "fit", "send")
+
+
 def _go(stage: str) -> None:
     """Navigate to a workflow stage on the next rerun (safe for widget state)."""
     st.session_state._pending_nav = stage
     st.rerun()
+
+
+def _style_progress() -> dict[str, bool]:
+    """What's done for the current style — drives stepper checkmarks."""
+    tp = st.session_state.tech_pack
+    has_style = bool(tp.get("style_number"))
+    sent = False
+    if has_style:
+        for record in load_wip_records():
+            if record.get("style_number") == tp.get("style_number"):
+                sent = record.get("status") == "Sent to Factory"
+                break
+    return {
+        "intake": has_style,
+        "techpack": has_style,
+        "fit": bool(tp.get("measurement_history")),
+        "send": sent,
+        "wip": sent,
+    }
+
+
+def _stepper() -> None:
+    """Always-visible workflow stepper on the main canvas — click any stage,
+    forward or back. Gated stages are disabled until a style is loaded."""
+    current = st.session_state.get("nav_stage", "intake")
+    has_style = bool(st.session_state.tech_pack.get("style_number"))
+    done = _style_progress()
+
+    cols = st.columns(len(WORKFLOW_STAGES))
+    for col, (key, label) in zip(cols, WORKFLOW_STAGES):
+        gated = key in _GATED_STAGES and not has_style
+        display = f"✓ {label[1:].strip()}" if done.get(key) and key != current else label
+        with col:
+            if st.button(
+                display,
+                key=f"nav_btn_{key}",
+                type="primary" if key == current else "secondary",
+                disabled=gated,
+                use_container_width=True,
+                help="Load or generate a style first." if gated else None,
+            ):
+                if key != current:
+                    _go(key)
+
+
+def _stage_footer_nav(stage: str) -> None:
+    """Uniform ← Back / Next → controls at the bottom of every process stage."""
+    if stage not in _PROCESS_ORDER:
+        return
+    idx = _PROCESS_ORDER.index(stage)
+    has_style = bool(st.session_state.tech_pack.get("style_number"))
+    st.divider()
+    cols = st.columns([2, 3, 2])
+    if idx > 0:
+        prev = _PROCESS_ORDER[idx - 1]
+        with cols[0]:
+            if st.button(f"← Back to {_STAGE_LABELS[prev]}", key=f"back_btn_{stage}"):
+                _go(prev)
+    if idx < len(_PROCESS_ORDER) - 1:
+        nxt = _PROCESS_ORDER[idx + 1]
+        gated = nxt in _GATED_STAGES and not has_style
+        with cols[2]:
+            if st.button(
+                f"Next: {_STAGE_LABELS[nxt]} →",
+                key=f"next_btn_{stage}",
+                type="primary",
+                disabled=gated,
+            ):
+                _go(nxt)
 
 
 def _flash(level: str, message: str) -> None:
@@ -438,16 +511,6 @@ def _sidebar_saved_styles() -> None:
 def sidebar() -> None:
     tech_pack = st.session_state.tech_pack
     with st.sidebar:
-        st.markdown("### Workflow")
-        st.radio(
-            "Workflow stage",
-            options=[key for key, _ in WORKFLOW_STAGES],
-            format_func=lambda k: _STAGE_LABELS[k],
-            key="nav_stage",
-            label_visibility="collapsed",
-        )
-
-        st.divider()
         st.markdown("### Current style")
         if tech_pack.get("style_number"):
             st.markdown(
@@ -1465,9 +1528,6 @@ def section_tech_pack_preview() -> None:
                 return
             st.session_state.export_path = path
             st.success(f"Excel exported: {Path(path).name}")
-    with cols[2]:
-        if st.button("Continue → ③ Fit & Revise", key="techpack_continue_btn"):
-            _go("fit")
     with cols[1]:
         if st.session_state.export_path and Path(st.session_state.export_path).is_file():
             path = Path(st.session_state.export_path)
@@ -1632,8 +1692,6 @@ def _render_fitting_room_live(tech_pack: dict[str, Any]) -> None:
         "Fit results are recorded on the tech pack (change log + revised measurements). "
         "Email drafting and sending live in the Send stage — no duplicate flows."
     )
-    if st.button("Continue → ④ Send to Factory", key="fitting_continue_send_btn"):
-        _go("send")
 
 
 def _render_paste_notes_tab(tech_pack: dict[str, Any]) -> None:
@@ -1719,8 +1777,6 @@ def _render_paste_notes_tab(tech_pack: dict[str, Any]) -> None:
 
     if st.session_state.get("last_fitting_summary"):
         st.success(st.session_state.last_fitting_summary)
-        if st.button("Continue → ④ Send to Factory", key="paste_continue_send_btn"):
-            _go("send")
 
     tech_pack = st.session_state.tech_pack
 
@@ -1948,6 +2004,7 @@ def main() -> None:
     _hero()
     _status_strip()
 
+    _stepper()
     _render_flashes()
 
     stage = st.session_state.get("nav_stage", "intake")
@@ -1975,6 +2032,8 @@ def main() -> None:
         section_wip_dashboard()
     elif stage == "library":
         section_brand_library()
+
+    _stage_footer_nav(stage)
 
     st.divider()
     st.caption(
