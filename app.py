@@ -468,9 +468,8 @@ def _init_state() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _sidebar_saved_styles() -> None:
+def _render_saved_styles(key_prefix: str = "sidebar") -> None:
     saved = list_tech_packs()
-    st.markdown("### Saved styles")
     if not saved:
         st.caption("No saved tech packs yet. Generate a style to populate this list.")
         return
@@ -483,29 +482,34 @@ def _sidebar_saved_styles() -> None:
         "Open a saved style",
         options=options,
         index=0,
-        key="sidebar_open_saved",
+        key=f"{key_prefix}_open_saved",
     )
     if choice and choice != "—":
         idx = options.index(choice) - 1
         target = saved[idx]
         cols = st.columns(2)
-        if cols[0].button("Load", key="sidebar_load_btn", use_container_width=True):
+        if cols[0].button("Load", key=f"{key_prefix}_load_btn", use_container_width=True):
             loaded = load_tech_pack(target["style_number"])
             if loaded:
                 st.session_state.tech_pack = {**_empty_tech_pack(), **loaded}
                 st.session_state.export_path = None
                 st.session_state.uploaded_sketch_bytes = None
                 st.session_state.uploaded_sketch_mime = None
-                st.success(f"Loaded {target['style_number']}.")
-                st.rerun()
+                _flash("success", f"Loaded {target['style_number']} — continue where you left off.")
+                _go("techpack")
             else:
                 st.error("Could not load that tech pack.")
-        if cols[1].button("Delete", key="sidebar_delete_btn", use_container_width=True):
+        if cols[1].button("Delete", key=f"{key_prefix}_delete_btn", use_container_width=True):
             if delete_tech_pack(target["style_number"]):
                 st.success(f"Deleted {target['style_number']}.")
                 st.rerun()
             else:
                 st.error("Delete failed.")
+
+
+def _sidebar_saved_styles() -> None:
+    st.markdown("### Saved styles")
+    _render_saved_styles("sidebar")
 
 
 def sidebar() -> None:
@@ -554,7 +558,7 @@ def _inject_css() -> None:
         <style>
         /* Hide Streamlit's default toolbar + footer for a cleaner product feel. */
         [data-testid="stToolbar"], #MainMenu, footer { visibility: hidden; height: 0; }
-        header[data-testid="stHeader"] { background: transparent; height: 0; }
+        header[data-testid="stHeader"] { background: transparent; }
 
         /* Tighter top/bottom padding on the main canvas. */
         .block-container { padding-top: 1.25rem; padding-bottom: 2rem; max-width: 1400px; }
@@ -889,6 +893,9 @@ def section_style_setup() -> None:
             "⚠️ No OPENAI_API_KEY set — generation runs offline from the "
             "category-standard spec block (sketch won't be analyzed)."
         )
+
+    with st.expander("Resume a saved style"):
+        _render_saved_styles("intake")
     with st.form("style_setup_form", clear_on_submit=False):
         upload = st.file_uploader(
             "Upload sketch (PDF, JPG, PNG)",
@@ -1965,6 +1972,8 @@ def section_send_to_factory() -> None:
 
 
 def section_wip_dashboard() -> None:
+    with st.expander("Open a saved style"):
+        _render_saved_styles("wip")
     records = load_wip_records()
     if not records:
         st.info("No WIP records yet. Send a tech pack to populate the dashboard.", icon="ℹ️")
