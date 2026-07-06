@@ -33,6 +33,60 @@ def save_wip_records(records: list[dict[str, Any]]) -> None:
         json.dump(records, fh, indent=2)
 
 
+def ensure_wip_record(record: dict[str, Any]) -> list[dict[str, Any]]:
+    """Register a style on the WIP board without clobbering its status.
+
+    New styles get status "In Development"; existing records keep their
+    status and milestones, but identity fields (name, stage) are refreshed.
+    """
+    style_number = (record.get("style_number") or "").strip()
+    if not style_number:
+        raise ValueError("style_number is required to add or update a WIP record.")
+
+    records = load_wip_records()
+    for i, existing in enumerate(records):
+        if existing.get("style_number", "").strip() == style_number:
+            refresh = {
+                k: v
+                for k, v in record.items()
+                if k not in ("status", "milestones") and v not in (None, "")
+            }
+            records[i] = {**existing, **refresh, "last_update": _now_iso()}
+            save_wip_records(records)
+            return records
+
+    records.append(
+        {
+            "status": "In Development",
+            "milestones": {},
+            **record,
+            "last_update": _now_iso(),
+        }
+    )
+    save_wip_records(records)
+    return records
+
+
+def set_wip_milestones(style_number: str, milestones: dict[str, str]) -> list[dict[str, Any]]:
+    """Persist T&A milestone dates (ISO strings) for a style."""
+    records = load_wip_records()
+    for i, existing in enumerate(records):
+        if existing.get("style_number", "").strip() == style_number.strip():
+            records[i] = {**existing, "milestones": milestones, "last_update": _now_iso()}
+            save_wip_records(records)
+            return records
+    records.append(
+        {
+            "style_number": style_number,
+            "status": "In Development",
+            "milestones": milestones,
+            "last_update": _now_iso(),
+        }
+    )
+    save_wip_records(records)
+    return records
+
+
 def add_or_update_wip_record(record: dict[str, Any]) -> list[dict[str, Any]]:
     """Insert or update a record keyed on style_number. Returns the full record list."""
     style_number = (record.get("style_number") or "").strip()

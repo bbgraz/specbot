@@ -542,6 +542,42 @@ def t_ui_revise_table_present():
     assert at.text_input(key="revise_reason_input").value, "reason field should be prefilled"
 check("UI: Revise Table worksheet renders on Fit & Revise", t_ui_revise_table_present)
 
+def t_wip_ensure_and_milestones():
+    import wip_store
+    wip_store.WIP_PATH.unlink(missing_ok=True)
+    wip_store.ensure_wip_record({"style_number": "AAA-1", "style_name": "First"})
+    recs = wip_store.load_wip_records()
+    assert recs[0]["status"] == "In Development"
+    # sending marks it sent; ensure() afterwards must NOT clobber that
+    wip_store.add_or_update_wip_record({"style_number": "AAA-1", "status": "Sent to Factory"})
+    wip_store.ensure_wip_record({"style_number": "AAA-1", "style_name": "First v2"})
+    recs = wip_store.load_wip_records()
+    assert recs[0]["status"] == "Sent to Factory" and recs[0]["style_name"] == "First v2"
+    # milestones persist
+    wip_store.set_wip_milestones("AAA-1", {"Proto due": "2026-07-20", "SMS due": "2026-08-15"})
+    recs = wip_store.load_wip_records()
+    assert recs[0]["milestones"]["Proto due"] == "2026-07-20"
+    wip_store.WIP_PATH.unlink(missing_ok=True)
+check("WIP: auto-registration keeps sent status; T&A milestones persist", t_wip_ensure_and_milestones)
+
+def t_ui_wip_report_calendar():
+    from streamlit.testing.v1 import AppTest
+    import wip_store
+    wip_store.WIP_PATH.unlink(missing_ok=True)
+    at = AppTest.from_file(str(APP_DIR / "app.py"), default_timeout=60)
+    at.run()
+    [b for b in at.button if "Demo" in (b.label or "")][0].click().run()
+    # generating registered the style on the board automatically
+    recs = wip_store.load_wip_records()
+    assert any(r["style_number"] == "TST-001" and r["status"] == "In Development" for r in recs)
+    at.button(key="nav_btn_wip").click().run()
+    assert len(at.exception) == 0
+    body = " ".join(str(m.value) for m in at.markdown)
+    assert "Overdue" in body and "Next 14 days" in body, "calendar views missing"
+    assert [m for m in at.metric if "Styles on board" in (m.label or "")], "report metrics missing"
+    wip_store.WIP_PATH.unlink(missing_ok=True)
+check("UI: WIP Board/Report/T&A Calendar render; styles auto-register on generate", t_ui_wip_report_calendar)
+
 def t_spec_diagram():
     from spec_diagram import render_spec_diagram
     from spec_blocks import build_offline_draft

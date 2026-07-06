@@ -49,7 +49,12 @@ from tech_pack_store import (
     save_tech_pack,
 )
 from spec_blocks import build_offline_draft, match_category
-from wip_store import add_or_update_wip_record, load_wip_records
+from wip_store import (
+    add_or_update_wip_record,
+    ensure_wip_record,
+    load_wip_records,
+    set_wip_milestones,
+)
 
 load_dotenv()
 
@@ -398,6 +403,17 @@ def _persist_current_tech_pack() -> None:
         return
     try:
         save_tech_pack(tp)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        ensure_wip_record(
+            {
+                "style_number": tp.get("style_number", ""),
+                "style_name": tp.get("style_name", ""),
+                "sample_stage": tp.get("sample_stage", DEFAULT_STAGE),
+                "garment_type": tp.get("garment_type", ""),
+            }
+        )
     except Exception:  # noqa: BLE001
         pass
 
@@ -2325,29 +2341,210 @@ def section_send_to_factory() -> None:
         )
 
 
-def section_wip_dashboard() -> None:
+TNA_MILESTONES: list[str] = ["Proto due", "Fit session", "SMS due", "PP due", "Bulk delivery"]
+
+
+def _parse_iso_date(value: str):
+    try:
+        return datetime.strptime(str(value)[:10], "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return None
+
+
+def _milestone_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Flatten milestones for overdue/upcoming views: one row per dated milestone."""
+    today = datetime.now().date()
+    rows = []
+    for r in records:
+        for name in TNA_MILESTONES:
+            d = _parse_iso_date((r.get("milestones") or {}).get(name, ""))
+            if d is None:
+                continue
+            rows.append(
+                {
+                    "style_number": r.get("style_number", ""),
+                    "style_name": r.get("style_name", ""),
+                    "milestone": name,
+                    "date": d,
+                    "days": (d - today).days,
+                    "status": r.get("status", ""),
+                }
+            )
+    rows.sort(key=lambda x: x["date"])
+    return rows
+
+
+def _tab_wip_board(records: list[dict[str, Any]]) -> None:
     with st.expander("Open a saved style"):
         _render_saved_styles("wip")
-    records = load_wip_records()
     if not records:
-        st.info("No WIP records yet. Send a tech pack to populate the dashboard.", icon="ℹ️")
+        st.info(
+            "No styles in progress yet. Generate a tech pack — every style lands "
+            "here automatically as “In Development”.",
+            icon="ℹ️",
+        )
         return
-
+    milestone_rows = _milestone_rows(records)
+    next_by_style: dict[str, str] = {}
+    for row in milestone_rows:
+        if row["days"] >= 0 and row["style_number"] not in next_by_style:
+            next_by_style[row["style_number"]] = f"{row['milestone']} · {row['date']}"
     df = pd.DataFrame(records)
+    df["next_milestone"] = df["style_number"].map(next_by_style).fillna("—")
     preferred = [
-        "style_number",
-        "style_name",
-        "sample_stage",
-        "factory_name",
-        "contact_name",
-        "status",
-        "last_update",
-        "tech_pack_file",
+        "style_number", "style_name", "sample_stage", "factory_name",
+        "contact_name", "status", "next_milestone", "last_update", "tech_pack_file",
     ]
-    columns = [c for c in preferred if c in df.columns] + [
-        c for c in df.columns if c not in preferred
-    ]
+    columns = [c for c in preferred if c in df.columns]
     st.dataframe(df[columns], use_container_width=True, hide_index=True)
+
+
+def _tab_wip_report(records: list[dict[str, Any]]) -> None:
+    if not records:
+        st.info("Nothing to report yet.", icon="ℹ️")
+        return
+    today = datetime.now().date()
+    milestone_rows = _milestone_rows(records)
+    overdue = [r for r in milestone_rows if r["days"] < 0]
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Styles on board", len(records))
+    m2.metric("In development", sum(1 for r in records if r.get("status") != "Sent to Factory"))
+    m3.metric("Sent to factory", sum(1 for r in records if r.get("status") == "Sent to Factory"))
+    m4.metric("Overdue milestones", len(overdue), delta_color="inverse")
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.markdown("**By status**")
+        status_counts = pd.DataFrame(records)["status"].value_counts().reset_index()
+        status_counts.columns = ["Status", "Styles"]
+        st.dataframe(status_counts, use_container_width=True, hide_index=True)
+    with col_b:
+        st.markdown("**By factory**")
+        fac = pd.DataFrame(records).get("factory_name")
+        if fac is not None:
+            fac_counts = fac.fillna("(unassigned)").replace("", "(unassigned)").value_counts().reset_index()
+            fac_counts.columns = ["Factory", "Styles"]
+            st.dataframe(fac_counts, use_container_width=True, hide_index=True)
+
+    st.markdown("**Aging — days since last activity**")
+    aging = []
+    for r in records:
+        last = _parse_iso_date(r.get("last_update", ""))
+        aging.append(
+            {
+                "Style #": r.get("style_number", ""),
+                "Name": r.get("style_name", ""),
+                "Status": r.get("status", ""),
+                "Last update": r.get("last_update", ""),
+                "Days idle": (today - last).days if last else "—",
+            }
+        )
+    aging.sort(key=lambda x: (x["Days idle"] if isinstance(x["Days idle"], int) else -1), reverse=True)
+    st.dataframe(pd.DataFrame(aging), use_container_width=True, hide_index=True)
+
+    export_rows = []
+    for r in records:
+        row = {k: v for k, v in r.items() if k != "milestones"}
+        for name in TNA_MILESTONES:
+            row[name] = (r.get("milestones") or {}).get(name, "")
+        export_rows.append(row)
+    csv = pd.DataFrame(export_rows).to_csv(index=False).encode("utf-8")
+    st.download_button(
+        "Download WIP report (CSV)",
+        data=csv,
+        file_name=f"wip_report_{datetime.now().strftime('%Y%m%d')}.csv",
+        mime="text/csv",
+        key="wip_report_download",
+    )
+
+
+def _tab_wip_calendar(records: list[dict[str, Any]]) -> None:
+    if not records:
+        st.info("Generate a style first — then plan its T&A dates here.", icon="ℹ️")
+        return
+    st.caption(
+        f"{LIVE_BADGE}. Time & Action calendar — set target dates per style. "
+        "Overdue and upcoming milestones surface below and on the Board."
+    )
+    rows = []
+    for r in records:
+        row: dict[str, Any] = {
+            "Style #": r.get("style_number", ""),
+            "Name": r.get("style_name", ""),
+        }
+        for name in TNA_MILESTONES:
+            row[name] = _parse_iso_date((r.get("milestones") or {}).get(name, ""))
+        rows.append(row)
+    edited = st.data_editor(
+        pd.DataFrame(rows),
+        num_rows="fixed",
+        use_container_width=True,
+        hide_index=True,
+        key="tna_editor",
+        column_config={
+            "Style #": st.column_config.TextColumn("Style #", disabled=True),
+            "Name": st.column_config.TextColumn("Name", disabled=True),
+            **{
+                name: st.column_config.DateColumn(name, format="YYYY-MM-DD")
+                for name in TNA_MILESTONES
+            },
+        },
+    )
+    by_number = {r.get("style_number", ""): (r.get("milestones") or {}) for r in records}
+    for _, row in edited.iterrows():
+        style_number = str(row.get("Style #", "")).strip()
+        if not style_number:
+            continue
+        new_ms = {}
+        for name in TNA_MILESTONES:
+            value = row.get(name)
+            if value is not None and str(value) != "NaT" and not (isinstance(value, float) and pd.isna(value)):
+                new_ms[name] = str(value)[:10]
+        if new_ms != {k: v for k, v in by_number.get(style_number, {}).items() if v}:
+            set_wip_milestones(style_number, new_ms)
+
+    milestone_rows = _milestone_rows(load_wip_records())
+    overdue = [r for r in milestone_rows if r["days"] < 0]
+    upcoming = [r for r in milestone_rows if 0 <= r["days"] <= 14]
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.markdown("**🔴 Overdue**")
+        if overdue:
+            for r in overdue:
+                st.markdown(
+                    f"- **{r['style_number']}** {r['milestone']} — {r['date']} "
+                    f"({-r['days']} day{'s' if r['days'] != -1 else ''} late)"
+                )
+        else:
+            st.caption("Nothing overdue.")
+    with col_b:
+        st.markdown("**🟡 Next 14 days**")
+        if upcoming:
+            for r in upcoming:
+                st.markdown(
+                    f"- **{r['style_number']}** {r['milestone']} — {r['date']} "
+                    f"(in {r['days']} day{'s' if r['days'] != 1 else ''})"
+                )
+        else:
+            st.caption("Nothing due in the next two weeks.")
+
+
+def section_wip_dashboard() -> None:
+    records = load_wip_records()
+    tabs = st.tabs(
+        [
+            f"Board  {LIVE_BADGE}",
+            f"Report  {LIVE_BADGE}",
+            f"T&A Calendar  {LIVE_BADGE}",
+        ]
+    )
+    with tabs[0]:
+        _tab_wip_board(records)
+    with tabs[1]:
+        _tab_wip_report(records)
+    with tabs[2]:
+        _tab_wip_calendar(records)
 
 
 # ---------------------------------------------------------------------------
