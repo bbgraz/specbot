@@ -21,6 +21,7 @@ sys.path.insert(0, str(APP_DIR))
 # Isolate side effects from the repo
 os.environ["SPECBOT_EXPORT_DIR"] = str(SCRATCH / "exports")
 os.environ["SPECBOT_WIP_PATH"] = str(SCRATCH / "wip_records.json")
+os.environ["SPECBOT_TECHPACK_DIR"] = str(SCRATCH / "tech_packs")
 os.environ.pop("OPENAI_API_KEY", None)
 os.environ.pop("RESEND_API_KEY", None)
 os.environ.pop("SMTP_HOST", None)
@@ -134,6 +135,30 @@ def t_offline_draft():
 check("Offline draft: full analysis shape from spec block, honest caveats", t_offline_draft)
 
 
+# ---------------------------------------------------------------- brand library + persistence
+def t_brand_library():
+    from brand_library import build_grounding, grounding_for_prompt, grounding_report
+    g = build_grounding("crewneck tee", "cotton jersey")
+    prompt = grounding_for_prompt(g)
+    assert prompt and "FBR-" in prompt  # cites real brand-library codes
+    report = grounding_report(g)
+    assert isinstance(report, dict) and report
+check("Brand library: grounding block + report built from mock brand data", t_brand_library)
+
+def t_tech_pack_store():
+    import tech_pack_store
+    tech_pack_store.TECH_PACK_DIR.mkdir(parents=True, exist_ok=True)
+    saved = tech_pack_store.save_tech_pack(copy.deepcopy(SAMPLE_TP))
+    assert Path(saved).is_file()
+    loaded = tech_pack_store.load_tech_pack("TST-001")
+    assert loaded and loaded["style_name"] == "Demo Tee"
+    listing = tech_pack_store.list_tech_packs()
+    assert any(r.get("style_number") == "TST-001" for r in listing)
+    assert tech_pack_store.delete_tech_pack("TST-001")
+    assert tech_pack_store.load_tech_pack("TST-001") is None
+check("Tech pack store: save, load, list, delete round-trip", t_tech_pack_store)
+
+
 # ---------------------------------------------------------------- fit update (rule-based)
 def t_fit_delta():
     from fit_update_service import apply_fitting_notes
@@ -180,7 +205,7 @@ def t_excel():
     assert Path(path).is_file() and Path(path).stat().st_size > 5000
     from openpyxl import load_workbook
     wb = load_workbook(path)
-    expected = ["Cover", "Measurements", "BOM", "Construction", "Change Log", "Assumptions and Missing"]
+    expected = ["Cover", "Measurements", "BOM", "Construction", "Grading", "Annotations", "Change Log", "Assumptions and Missing"]
     assert wb.sheetnames == expected, wb.sheetnames
     for name in expected:
         ws = wb[name]

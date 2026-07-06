@@ -433,7 +433,7 @@ def ground_measurements(
             "source": ai.get("source", ""),
             "notes": ai.get("notes", ""),
         }
-        if extra["source"] != "derived_from_input":
+        if extra["source"] not in ("derived_from_input", "matched_from_brand_library"):
             extra["source"] = "placeholder_for_review"
             suffix = "Not in category-standard block — confirm before sampling."
             extra["notes"] = f"{extra['notes']} {suffix}".strip()

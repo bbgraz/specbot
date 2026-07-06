@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 from datetime import datetime
@@ -12,11 +13,13 @@ import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
 
+from brand_library import build_grounding, grounding_for_prompt, grounding_report
 from email_sender import send_factory_email
 from excel_exporter import export_tech_pack_to_excel
 from fit_update_service import apply_fitting_notes
 from mock_data import (
     CONSTRUCTION_ZONES,
+    DEFAULT_GRADE_RULES,
     DEFAULT_SIZE_RUN,
     DEFAULT_STAGE,
     FEATURE_ROADMAP,
@@ -32,16 +35,16 @@ from mock_data import (
     MOCK_COSTING_TARGET_FOB,
     MOCK_COSTING_TOTAL_FOB,
     MOCK_FACTORY_PROFILES,
-    MOCK_FITTING_DRAFT_BODY,
-    MOCK_FITTING_DRAFT_SUBJECT,
-    MOCK_FITTING_PINNED_PHOTOS,
-    MOCK_FITTING_STRUCTURED_UPDATES,
     MOCK_FITTING_TRANSCRIPT,
     MOCK_REVISIONS,
-    MOCK_SKETCH_ANNOTATIONS,
     SAMPLE_STAGES,
     build_graded_table,
-    get_grounding_report,
+)
+from tech_pack_store import (
+    delete_tech_pack,
+    list_tech_packs,
+    load_tech_pack,
+    save_tech_pack,
 )
 from spec_blocks import build_offline_draft
 from wip_store import add_or_update_wip_record, load_wip_records
@@ -84,6 +87,10 @@ def _empty_tech_pack() -> dict[str, Any]:
         "change_log": [],
         "assumptions": [],
         "missing_information": [],
+        "annotations": [],
+        "grade_rules": dict(DEFAULT_GRADE_RULES),
+        "grounding_report": {},
+        "fit_photos": [],
     }
 
 
@@ -145,7 +152,7 @@ def _to_tech_pack(analysis: dict[str, Any], metadata: dict[str, Any]) -> dict[st
             }
         )
 
-    return {
+    tp = {
         **_empty_tech_pack(),
         **metadata,
         "garment_summary": analysis.get("garment_summary", ""),
@@ -156,6 +163,10 @@ def _to_tech_pack(analysis: dict[str, Any], metadata: dict[str, Any]) -> dict[st
         "assumptions": analysis.get("assumptions", []) or [],
         "missing_information": analysis.get("missing_information", []) or [],
     }
+    grounding_payload = analysis.get("grounding_report")
+    if grounding_payload:
+        tp["grounding_report"] = grounding_payload
+    return tp
 
 
 def _measurements_df(tech_pack: dict[str, Any]) -> pd.DataFrame:
@@ -235,6 +246,30 @@ def _preview_banner(text: str) -> None:
     st.info(f"{PREVIEW_BADGE} — {text}", icon="🔒")
 
 
+def _b64(data: bytes) -> str:
+    return base64.b64encode(data).decode("ascii")
+
+
+def _from_b64(s: str) -> bytes:
+    if not s:
+        return b""
+    try:
+        return base64.b64decode(s.encode("ascii"))
+    except (ValueError, TypeError):
+        return b""
+
+
+def _persist_current_tech_pack() -> None:
+    """Save the currently-loaded tech pack to disk; swallow errors quietly."""
+    tp = st.session_state.get("tech_pack") or {}
+    if not tp.get("style_number"):
+        return
+    try:
+        save_tech_pack(tp)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 # ---------------------------------------------------------------------------
 # State
 # ---------------------------------------------------------------------------
@@ -248,11 +283,55 @@ def _init_state() -> None:
     st.session_state.setdefault("uploaded_sketch_bytes", None)
     st.session_state.setdefault("uploaded_sketch_mime", None)
     st.session_state.setdefault("fitting_demo_played", False)
+    st.session_state.setdefault("fitting_transcript", "")
+    st.session_state.setdefault("fitting_change_count", 0)
+    st.session_state.setdefault("fitting_draft_subject", "")
+    st.session_state.setdefault("fitting_draft_body", "")
 
 
 # ---------------------------------------------------------------------------
 # Sidebar
 # ---------------------------------------------------------------------------
+
+
+def _sidebar_saved_styles() -> None:
+    saved = list_tech_packs()
+    st.markdown("### Saved styles")
+    if not saved:
+        st.caption("No saved tech packs yet. Generate a style to populate this list.")
+        return
+
+    options = ["—"] + [
+        f"{s['style_number']} · {s['style_name'] or '(no name)'} · {s['sample_stage']}"
+        for s in saved
+    ]
+    choice = st.selectbox(
+        "Open a saved style",
+        options=options,
+        index=0,
+        key="sidebar_open_saved",
+    )
+    if choice and choice != "—":
+        idx = options.index(choice) - 1
+        target = saved[idx]
+        cols = st.columns(2)
+        if cols[0].button("Load", key="sidebar_load_btn", use_container_width=True):
+            loaded = load_tech_pack(target["style_number"])
+            if loaded:
+                st.session_state.tech_pack = {**_empty_tech_pack(), **loaded}
+                st.session_state.export_path = None
+                st.session_state.uploaded_sketch_bytes = None
+                st.session_state.uploaded_sketch_mime = None
+                st.success(f"Loaded {target['style_number']}.")
+                st.rerun()
+            else:
+                st.error("Could not load that tech pack.")
+        if cols[1].button("Delete", key="sidebar_delete_btn", use_container_width=True):
+            if delete_tech_pack(target["style_number"]):
+                st.success(f"Deleted {target['style_number']}.")
+                st.rerun()
+            else:
+                st.error("Delete failed.")
 
 
 def sidebar() -> None:
@@ -270,6 +349,9 @@ def sidebar() -> None:
             )
         else:
             st.caption("No style loaded yet.")
+
+        st.divider()
+        _sidebar_saved_styles()
 
         st.divider()
         st.markdown("### Roadmap")
@@ -424,16 +506,17 @@ def section_header() -> None:
 
 def section_brand_library() -> None:
     st.markdown(
-        f"**This is what the AI knows about {MOCK_BRAND_NAME}.** Without this layer, "
-        "every tech pack is a generic guess. SpecBot syncs from the brand's existing "
-        "system of record — PLM, Drive folders, CSV exports — and uses it to ground "
-        "every AI generation. **We don't replace the system of record. We're the AI "
-        "layer that sits on top of it.**"
+        f"**This is what the AI knows about {MOCK_BRAND_NAME}.** Every tech pack you "
+        "generate is grounded against this library — fabric codes, trim codes, and house "
+        "construction standards are pulled from here, not invented. SpecBot syncs from the "
+        "brand's existing system of record (PLM, Drive folders, CSV exports). "
+        "**We don't replace the system of record. We're the AI layer that sits on top of it.**"
     )
-    _preview_banner(
-        "Today this view shows static demo data. Production version syncs nightly from "
-        "Centric / Backbone / FlexPLM, or from a Google Drive / SharePoint folder of CSVs. "
-        "The brand never maintains the library inside SpecBot."
+    st.success(
+        "✅ Live grounding: the entries below are read by the GPT prompt every time you "
+        "generate a tech pack. Edit `mock_data.py` to swap them out for your own data, or "
+        "wire up a sync via the Sync tab (preview).",
+        icon="✅",
     )
 
     fabrics_count = len(MOCK_BRAND_FABRICS)
@@ -642,9 +725,13 @@ def section_style_setup() -> None:
         st.error(f"Could not import GPT service: {exc}")
         return
 
-    with st.spinner("Analyzing sketch and drafting tech pack…"):
+    grounding = build_grounding(garment_type, fabric)
+    grounding_block = grounding_for_prompt(grounding)
+    report = grounding_report(grounding)
+
+    with st.spinner("Grounding against brand library and drafting tech pack…"):
         try:
-            analysis = analyze_sketch(upload, metadata)
+            analysis = analyze_sketch(upload, metadata, grounding_block=grounding_block)
         except Exception as exc:  # noqa: BLE001
             analysis = build_offline_draft(metadata)
             st.warning(
@@ -652,9 +739,15 @@ def section_style_setup() -> None:
                 "category-standard spec block instead — the sketch was NOT analyzed."
             )
 
-    st.session_state.tech_pack = _to_tech_pack(analysis, metadata)
+    analysis["grounding_report"] = report
+    tech_pack = _to_tech_pack(analysis, metadata)
+    st.session_state.tech_pack = tech_pack
     st.session_state.export_path = None
-    st.success("Draft tech pack generated. Review below.")
+    try:
+        save_tech_pack(tech_pack)
+    except Exception as exc:  # noqa: BLE001
+        st.warning(f"Generated, but local save failed: {exc}")
+    st.success("Draft tech pack generated and grounded against the brand library. Review below.")
 
 
 # ---- Tech pack preview ----------------------------------------------------
@@ -688,13 +781,16 @@ def _tab_overview(tech_pack: dict[str, Any]) -> None:
 
 
 def _render_grounding_card(tech_pack: dict[str, Any]) -> None:
-    """Show what the AI WOULD report if connected to the brand library."""
-    report = get_grounding_report(tech_pack.get("garment_type", ""))
+    """Show the brand-library context the AI was actually given for this style."""
+    report = tech_pack.get("grounding_report") or grounding_report(
+        build_grounding(tech_pack.get("garment_type", ""), tech_pack.get("fabric", ""))
+    )
     with st.container(border=True):
-        st.markdown(f"#### Brand grounding report  {PREVIEW_BADGE}")
+        st.markdown(f"#### Brand grounding report  {LIVE_BADGE}")
         st.caption(
-            "When the brand library is wired up, every AI generation produces this card. "
-            "Below is what the report **would say** for this style, based on the demo brand library."
+            "Every AI generation is grounded against the brand library. This card shows the "
+            "fabric, construction standards, similar past styles, and factory the model was "
+            "given before drafting this tech pack."
         )
         col_a, col_b = st.columns(2)
         with col_a:
@@ -733,25 +829,88 @@ def _tab_measurements(tech_pack: dict[str, Any]) -> None:
             )
         },
     )
-    tech_pack["measurements"] = _df_to_measurements(edited)
+    new_rows = _df_to_measurements(edited)
+    if new_rows != tech_pack.get("measurements"):
+        tech_pack["measurements"] = new_rows
+        _persist_current_tech_pack()
 
 
 def _tab_grading(tech_pack: dict[str, Any]) -> None:
-    _preview_banner(
-        "Apply your brand's grade rules to fan a sample-size POM table out across the full size run. "
-        "The table below uses generic default rules; replace with your house grade rules to enable."
+    st.caption(
+        f"{LIVE_BADGE}. Editable per-POM rules. Sample size is the anchor row; "
+        "every other size is computed as `target ± rule × steps`."
     )
     measurements = tech_pack.get("measurements", []) or []
     if not measurements:
-        st.caption("No measurements to grade yet.")
+        st.info("No measurements to grade yet. Add or edit rows in the Measurements tab first.")
         return
+
     sample_size = tech_pack.get("sample_size") or "M"
-    rows = build_graded_table(measurements, sample_size=sample_size, size_run=DEFAULT_SIZE_RUN)
+    rule_overrides: dict[str, float] = dict(tech_pack.get("grade_rules") or {})
+
+    rule_rows: list[dict[str, Any]] = []
+    for m in measurements:
+        pom = m.get("pom", "")
+        if not pom:
+            continue
+        current = rule_overrides.get(pom)
+        if current is None:
+            current = _resolve_default_rule(pom)
+        rule_rows.append({"POM": pom, "Grade rule (in)": float(current)})
+
+    st.markdown("**Grade rules (per POM, inches between adjacent sizes)**")
+    edited = st.data_editor(
+        pd.DataFrame(rule_rows),
+        num_rows="fixed",
+        use_container_width=True,
+        hide_index=True,
+        key="grading_rules_editor",
+        column_config={
+            "POM": st.column_config.TextColumn("POM", disabled=True),
+            "Grade rule (in)": st.column_config.NumberColumn(
+                "Grade rule (in)",
+                min_value=0.0,
+                max_value=4.0,
+                step=0.125,
+                format="%.3f",
+            ),
+        },
+    )
+
+    new_rules: dict[str, float] = {}
+    for _, row in edited.iterrows():
+        pom = str(row.get("POM", "")).strip()
+        if not pom:
+            continue
+        try:
+            new_rules[pom] = float(row.get("Grade rule (in)", 0))
+        except (TypeError, ValueError):
+            continue
+
+    if new_rules != tech_pack.get("grade_rules"):
+        tech_pack["grade_rules"] = new_rules
+        _persist_current_tech_pack()
+
+    st.markdown("**Graded size run**")
+    rows = build_graded_table(
+        measurements,
+        sample_size=sample_size,
+        size_run=DEFAULT_SIZE_RUN,
+        rule_overrides=new_rules,
+    )
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
     st.caption(
-        f"Grade rules below are defaults (chest 1.0\", body length 0.5\", sleeve 0.25\", etc.). "
-        f"Sample size **{sample_size}** is the anchor row."
+        f"Sample size **{sample_size}** is the anchor row. "
+        "Edits to the rule table above immediately re-grade and persist with the style."
     )
+
+
+def _resolve_default_rule(pom: str) -> float:
+    name = pom.lower()
+    for keyword, rule in DEFAULT_GRADE_RULES.items():
+        if keyword in name:
+            return rule
+    return 0.5
 
 
 def _tab_construction(tech_pack: dict[str, Any]) -> None:
@@ -786,7 +945,10 @@ def _tab_construction(tech_pack: dict[str, Any]) -> None:
             ),
         },
     )
-    tech_pack["construction_notes"] = _df_to_construction(edited)
+    new_rows = _df_to_construction(edited)
+    if new_rows != tech_pack.get("construction_notes"):
+        tech_pack["construction_notes"] = new_rows
+        _persist_current_tech_pack()
 
 
 def _tab_bom(tech_pack: dict[str, Any]) -> None:
@@ -839,14 +1001,49 @@ def _tab_colorways(tech_pack: dict[str, Any]) -> None:
 
 
 def _tab_annotations(tech_pack: dict[str, Any]) -> None:
-    _preview_banner(
-        "Numbered callouts pinned to the sketch (like '1: French seam at side'). "
-        "Drag-to-pin and freehand markup are on the roadmap. Today this tab shows static demo callouts."
+    st.caption(
+        f"{LIVE_BADGE}. Numbered callouts pinned to a construction zone. "
+        "Drag-to-pin on the sketch is still on the roadmap; today this is text-driven."
     )
-    df = pd.DataFrame(MOCK_SKETCH_ANNOTATIONS)
-    df.columns = ["#", "Zone", "Callout"]
-    st.dataframe(df, use_container_width=True, hide_index=True)
-    st.button("Add callout", disabled=True, help="Preview only.")
+    annotations = list(tech_pack.get("annotations") or [])
+    if not annotations:
+        df = pd.DataFrame(columns=["#", "zone", "callout"])
+    else:
+        df = pd.DataFrame(
+            [
+                {"#": i + 1, "zone": a.get("zone", "(general)"), "callout": a.get("callout", "")}
+                for i, a in enumerate(annotations)
+            ]
+        )
+
+    edited = st.data_editor(
+        df,
+        num_rows="dynamic",
+        use_container_width=True,
+        hide_index=True,
+        key="annotations_editor",
+        column_config={
+            "#": st.column_config.NumberColumn("#", disabled=True),
+            "zone": st.column_config.SelectboxColumn("zone", options=CONSTRUCTION_ZONES),
+            "callout": st.column_config.TextColumn(
+                "callout", help="What does this callout describe?"
+            ),
+        },
+    )
+
+    new_annotations: list[dict[str, Any]] = []
+    for _, row in edited.iterrows():
+        callout = str(row.get("callout", "")).strip()
+        zone = str(row.get("zone", "")).strip() or "(general)"
+        if not callout:
+            continue
+        new_annotations.append(
+            {"id": len(new_annotations) + 1, "zone": zone, "callout": callout}
+        )
+
+    if new_annotations != tech_pack.get("annotations"):
+        tech_pack["annotations"] = new_annotations
+        _persist_current_tech_pack()
 
 
 def _tab_revisions(tech_pack: dict[str, Any]) -> None:
@@ -883,12 +1080,12 @@ def section_tech_pack_preview() -> None:
     tab_labels = [
         "Overview",
         f"Measurements  {LIVE_BADGE}",
-        f"Grading  {PREVIEW_BADGE}",
+        f"Grading  {LIVE_BADGE}",
         f"Construction  {LIVE_BADGE}",
         f"BOM  {LIVE_BADGE}",
         f"Costing  {PREVIEW_BADGE}",
         f"Colorways  {PREVIEW_BADGE}",
-        f"Annotations  {PREVIEW_BADGE}",
+        f"Annotations  {LIVE_BADGE}",
         f"Revisions  {PREVIEW_BADGE}",
         "Assumptions",
     ]
@@ -941,69 +1138,224 @@ def section_tech_pack_preview() -> None:
 # ---- Fitting -------------------------------------------------------------
 
 
-def _render_fitting_room_preview(tech_pack: dict[str, Any]) -> None:
+def _render_fitting_room_live(tech_pack: dict[str, Any]) -> None:
     st.markdown(
         "**The home-run flow.** Voice + photo capture during the fit session, "
         "structured into POM updates, photo callouts, and a draft factory comment "
-        "**before the TD leaves the room**. Designed mobile-first for iPad / phone."
-    )
-    _preview_banner(
-        "Voice transcription, photo-to-zone pinning, and structured POM extraction "
-        "are the next major build. Click 'Play demo session' below to see the experience."
+        "**before the TD leaves the room**. iPad-friendly: record into Voice Memos, "
+        "drop the m4a here, snap photos and tag them by zone."
     )
 
-    cols = st.columns([1, 1, 1, 2])
-    cols[0].button("● Record", disabled=True, help="Mic capture — preview only.")
-    cols[1].button("📷 Pin photo", disabled=True, help="Photo-to-zone pinning — preview only.")
-    play = cols[2].button("▶ Play demo session", key="play_fitting_demo")
-
-    if play:
-        st.session_state.fitting_demo_played = True
-    if not st.session_state.get("fitting_demo_played"):
-        st.caption(
-            "Tap **Play demo session** to walk through the full Fit 2 capture: "
-            "voice transcript → AI-structured POM updates → pinned photos → drafted factory comment."
+    has_openai = bool(os.getenv("OPENAI_API_KEY"))
+    if not has_openai:
+        st.warning(
+            "OPENAI_API_KEY not set — voice transcription and AI email drafting are disabled. "
+            "You can still upload photos and pin them to zones, and use the **Paste Notes** tab.",
+            icon="⚠️",
         )
-        return
 
-    st.divider()
-    st.markdown("##### 1 · Live transcript")
-    st.code(MOCK_FITTING_TRANSCRIPT, language="text")
+    st.markdown("##### 1 · Capture voice")
+    cols = st.columns([2, 1])
+    with cols[0]:
+        audio_upload = st.file_uploader(
+            "Voice recording (m4a / wav / mp3 / webm)",
+            type=["m4a", "wav", "mp3", "webm", "mp4", "ogg"],
+            key="fitting_audio_upload",
+        )
+    with cols[1]:
+        load_demo = st.button("Load demo transcript", key="fitting_load_demo")
 
-    st.markdown("##### 2 · AI-structured POM updates")
-    st.dataframe(
-        pd.DataFrame(MOCK_FITTING_STRUCTURED_UPDATES),
-        use_container_width=True,
-        hide_index=True,
-    )
-    cols_2 = st.columns([1, 1, 4])
-    cols_2[0].button("Apply all to tech pack", disabled=True, help="Functional in next build.")
-    cols_2[1].button("Edit before applying", disabled=True, help="Functional in next build.")
+    if load_demo:
+        st.session_state.fitting_transcript = MOCK_FITTING_TRANSCRIPT
+        st.session_state.fitting_demo_played = True
 
-    st.markdown("##### 3 · Pinned photos (anchored to construction zones)")
-    st.dataframe(
-        pd.DataFrame(MOCK_FITTING_PINNED_PHOTOS),
-        use_container_width=True,
-        hide_index=True,
-    )
+    if audio_upload is not None and has_openai:
+        if st.button("Transcribe recording", key="fitting_transcribe_btn"):
+            with st.spinner("Transcribing with Whisper…"):
+                try:
+                    from gpt_service import transcribe_audio
 
-    st.markdown("##### 4 · Drafted factory comment")
-    st.text_input(
-        "Subject",
-        value=MOCK_FITTING_DRAFT_SUBJECT,
-        key="fitting_draft_subject",
-        disabled=True,
+                    transcript = transcribe_audio(
+                        audio_upload.getvalue(),
+                        filename=getattr(audio_upload, "name", "fitting.m4a"),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    st.error(f"Transcription failed: {exc}")
+                    transcript = ""
+            if transcript:
+                st.session_state.fitting_transcript = transcript
+                st.success("Transcript captured.")
+
+    transcript_value = st.session_state.get("fitting_transcript", "")
+    transcript = st.text_area(
+        "Transcript (editable)",
+        value=transcript_value,
+        height=180,
+        key="fitting_transcript_editor",
+        placeholder="Voice will land here after transcription. You can also type / paste directly.",
     )
-    st.text_area(
-        "Body",
-        value=MOCK_FITTING_DRAFT_BODY,
-        height=260,
-        key="fitting_draft_body",
-        disabled=True,
+    st.session_state.fitting_transcript = transcript
+
+    st.markdown("##### 2 · Pin photos to zones")
+    photo_uploads = st.file_uploader(
+        "Fit photos (multiple OK)",
+        type=["jpg", "jpeg", "png"],
+        accept_multiple_files=True,
+        key="fitting_photo_upload",
     )
-    cols_3 = st.columns([1, 1, 4])
-    cols_3[0].button("Send draft to factory", disabled=True, help="Functional in next build.")
-    cols_3[1].button("Save as Rev 3", disabled=True, help="Functional in next build.")
+    pinned: list[dict[str, Any]] = list(tech_pack.get("fit_photos") or [])
+    if photo_uploads:
+        existing_names = {p.get("filename") for p in pinned}
+        for up in photo_uploads:
+            if up.name in existing_names:
+                continue
+            pinned.append(
+                {
+                    "filename": up.name,
+                    "zone": "(general)",
+                    "note": "",
+                    "bytes_b64": _b64(up.getvalue()),
+                }
+            )
+        tech_pack["fit_photos"] = pinned
+        _persist_current_tech_pack()
+
+    if pinned:
+        for i, photo in enumerate(pinned):
+            with st.container(border=True):
+                pcols = st.columns([1, 2, 2, 1])
+                with pcols[0]:
+                    img_bytes = _from_b64(photo.get("bytes_b64", ""))
+                    if img_bytes:
+                        st.image(img_bytes, use_container_width=True)
+                    else:
+                        st.caption("(no image)")
+                with pcols[1]:
+                    st.markdown(f"**{photo.get('filename', f'photo {i+1}')}**")
+                    new_zone = st.selectbox(
+                        "Zone",
+                        options=CONSTRUCTION_ZONES,
+                        index=(
+                            CONSTRUCTION_ZONES.index(photo["zone"])
+                            if photo.get("zone") in CONSTRUCTION_ZONES
+                            else 0
+                        ),
+                        key=f"fitphoto_zone_{i}",
+                    )
+                with pcols[2]:
+                    new_note = st.text_input(
+                        "Note", value=photo.get("note", ""), key=f"fitphoto_note_{i}"
+                    )
+                with pcols[3]:
+                    if st.button("Remove", key=f"fitphoto_rm_{i}"):
+                        pinned.pop(i)
+                        tech_pack["fit_photos"] = pinned
+                        _persist_current_tech_pack()
+                        st.rerun()
+                if new_zone != photo.get("zone") or new_note != photo.get("note"):
+                    photo["zone"] = new_zone
+                    photo["note"] = new_note
+                    tech_pack["fit_photos"] = pinned
+                    _persist_current_tech_pack()
+    else:
+        st.caption("No fit photos pinned yet.")
+
+    st.markdown("##### 3 · Structure POM updates from transcript")
+    if st.button("Extract POM updates", key="fitting_extract_btn"):
+        if not transcript.strip():
+            st.warning("Add a transcript first (record, transcribe, or paste).")
+        else:
+            with st.spinner("Reading the transcript…"):
+                revised = apply_fitting_notes(tech_pack, transcript)
+            new_entries = revised.get("change_log", [])[len(tech_pack.get("change_log", [])) :]
+            for entry in new_entries:
+                entry.setdefault("stage", tech_pack.get("sample_stage", DEFAULT_STAGE))
+            revised["fit_photos"] = pinned
+            st.session_state.tech_pack = revised
+            st.session_state.fitting_change_count = len(new_entries)
+            _persist_current_tech_pack()
+            st.success(f"{len(new_entries)} change-log entries added from the transcript.")
+
+    if st.session_state.get("fitting_change_count"):
+        st.caption(
+            f"{st.session_state['fitting_change_count']} updates applied from the most recent extraction. "
+            "See the **Tech Pack → Measurements / Change Log** tabs for the full diff."
+        )
+
+    st.markdown("##### 4 · Draft factory email")
+    factories = load_factories()
+    if factories:
+        fcols = st.columns(2)
+        f_idx = fcols[0].selectbox(
+            "Factory",
+            options=range(len(factories)),
+            format_func=lambda i: factories[i]["factory_name"],
+            key="fitting_factory_select",
+        )
+        contact_options = factories[f_idx].get("contacts", [])
+        c_idx = fcols[1].selectbox(
+            "Contact",
+            options=range(len(contact_options)) if contact_options else [0],
+            format_func=lambda i: (
+                contact_options[i]["name"] if contact_options else "(no contacts)"
+            ),
+            key="fitting_contact_select",
+        )
+        factory_name = factories[f_idx]["factory_name"]
+        contact_name = contact_options[c_idx]["name"] if contact_options else ""
+    else:
+        factory_name = ""
+        contact_name = ""
+
+    if st.button("Draft email from this session", key="fitting_draft_btn", disabled=not has_openai):
+        if not transcript.strip() and not pinned:
+            st.warning("Capture a transcript or pin a photo first.")
+        else:
+            change_log = st.session_state.tech_pack.get("change_log", []) or []
+            recent_updates = change_log[-10:]
+            structured = [
+                {
+                    "pom": e.get("pom", ""),
+                    "delta": e.get("new_value", ""),
+                    "reason": e.get("reason", ""),
+                }
+                for e in recent_updates
+            ]
+            with st.spinner("Drafting…"):
+                try:
+                    from gpt_service import draft_fitting_email
+
+                    draft = draft_fitting_email(
+                        st.session_state.tech_pack,
+                        transcript,
+                        structured,
+                        pinned,
+                        factory_name=factory_name,
+                        contact_name=contact_name,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    st.error(f"Drafting failed: {exc}")
+                    draft = None
+            if draft:
+                st.session_state.fitting_draft_subject = draft["subject"]
+                st.session_state.fitting_draft_body = draft["body"]
+
+    if st.session_state.get("fitting_draft_subject") or st.session_state.get("fitting_draft_body"):
+        st.text_input(
+            "Subject",
+            value=st.session_state.get("fitting_draft_subject", ""),
+            key="fitting_draft_subject_field",
+        )
+        st.text_area(
+            "Body",
+            value=st.session_state.get("fitting_draft_body", ""),
+            height=260,
+            key="fitting_draft_body_field",
+        )
+        st.caption(
+            "To send, head to **Send to Factory** — copy the subject/body across, and the "
+            "test-mode redirect still applies."
+        )
 
 
 def _render_paste_notes_tab(tech_pack: dict[str, Any]) -> None:
@@ -1054,6 +1406,7 @@ def _render_paste_notes_tab(tech_pack: dict[str, Any]) -> None:
             )
             st.success(st.session_state.last_fitting_summary)
             st.session_state.export_path = None
+            _persist_current_tech_pack()
 
     tech_pack = st.session_state.tech_pack
 
@@ -1070,9 +1423,9 @@ def section_fitting_notes() -> None:
         st.info("Generate a tech pack first.", icon="ℹ️")
         return
 
-    tabs = st.tabs([f"Fitting Room  {PREVIEW_BADGE}", f"Paste Notes  {LIVE_BADGE}"])
+    tabs = st.tabs([f"Fitting Room  {LIVE_BADGE}", f"Paste Notes  {LIVE_BADGE}"])
     with tabs[0]:
-        _render_fitting_room_preview(tech_pack)
+        _render_fitting_room_live(tech_pack)
     with tabs[1]:
         _render_paste_notes_tab(tech_pack)
 
@@ -1121,6 +1474,17 @@ def section_send_to_factory() -> None:
         "Please review the measurement table and confirm sample lead time.\n\n"
         "Thanks,\nSpecBot demo"
     )
+
+    fitting_draft_body = st.session_state.get("fitting_draft_body") or ""
+    fitting_draft_subject = st.session_state.get("fitting_draft_subject") or ""
+    if fitting_draft_body:
+        if st.checkbox(
+            "Use fitting-room draft as the email body",
+            key="use_fitting_draft",
+            value=False,
+        ):
+            default_subject = fitting_draft_subject or default_subject
+            default_body = fitting_draft_body
 
     subject = st.text_input("Email subject", value=default_subject, key="email_subject")
     body = st.text_area("Email body", value=default_body, height=180, key="email_body")
@@ -1221,7 +1585,7 @@ def main() -> None:
 
     nav = st.tabs(
         [
-            f"Brand Library  {PREVIEW_BADGE}",
+            f"Brand Library  {LIVE_BADGE}",
             "Style Setup",
             "Tech Pack",
             "Fitting",

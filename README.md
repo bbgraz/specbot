@@ -110,6 +110,8 @@ specbot/
   app.py                 Streamlit UI (single page)
   gpt_service.py         OpenAI GPT-4o calls (sketch + fitting notes)
   spec_blocks.py         Category-standard POM spec blocks + AI grounding + offline drafts
+  brand_library.py       Mock brand library (fabrics, trims, standards) grounding for GPT
+  tech_pack_store.py     JSON-backed per-style persistence (saved styles picker)
   excel_exporter.py      Multi-sheet Excel export (xlsxwriter)
   fit_update_service.py  Apply fitting notes -> updated tech pack + change log
   email_sender.py        Resend or SMTP transport, test-mode redirect

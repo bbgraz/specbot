@@ -10,6 +10,8 @@ from typing import Any
 
 import xlsxwriter
 
+from mock_data import DEFAULT_SIZE_RUN, build_graded_table
+
 _DEFAULT_EXPORT_DIR = Path(__file__).resolve().parent / "exports"
 EXPORT_DIR = Path(os.getenv("SPECBOT_EXPORT_DIR") or _DEFAULT_EXPORT_DIR)
 
@@ -168,7 +170,61 @@ def export_tech_pack_to_excel(tech_pack: dict[str, Any]) -> str:
     con_sheet.set_column(2, 2, 60)
     con_sheet.freeze_panes(data_start, 0)
 
-    # 5. Change Log
+    # 5a. Grading
+    grade_sheet = workbook.add_worksheet("Grading")
+    next_row = _write_header_band(grade_sheet, tech_pack, "Grading", title_fmt, meta_fmt, generated_at)
+    measurements = tech_pack.get("measurements", []) or []
+    if measurements:
+        rule_overrides = tech_pack.get("grade_rules") or {}
+        sample_size = tech_pack.get("sample_size") or "M"
+        graded = build_graded_table(
+            measurements,
+            sample_size=sample_size,
+            size_run=DEFAULT_SIZE_RUN,
+            rule_overrides=rule_overrides,
+        )
+        if graded:
+            headers = list(graded[0].keys())
+            for col, h in enumerate(headers):
+                grade_sheet.write(next_row, col, h, header_fmt)
+            data_start = next_row + 1
+            rows_for_size = []
+            for i, row in enumerate(graded):
+                values = [row.get(h, "") for h in headers]
+                for col, v in enumerate(values):
+                    grade_sheet.write(data_start + i, col, v, cell_fmt)
+                rows_for_size.append(values)
+            _autosize(grade_sheet, headers, rows_for_size)
+            grade_sheet.freeze_panes(data_start, 1)
+        else:
+            grade_sheet.write(next_row, 0, "(no measurements to grade)", cell_fmt)
+    else:
+        grade_sheet.write(next_row, 0, "(no measurements to grade)", cell_fmt)
+
+    # 5b. Annotations
+    ann_sheet = workbook.add_worksheet("Annotations")
+    next_row = _write_header_band(
+        ann_sheet, tech_pack, "Sketch Annotations", title_fmt, meta_fmt, generated_at
+    )
+    ann_headers = ["#", "Zone", "Callout"]
+    for col, h in enumerate(ann_headers):
+        ann_sheet.write(next_row, col, h, header_fmt)
+    data_start = next_row + 1
+    rows_for_size = []
+    for i, ann in enumerate(tech_pack.get("annotations", []) or []):
+        values = [
+            ann.get("id", i + 1),
+            ann.get("zone", ""),
+            ann.get("callout", ""),
+        ]
+        for col, v in enumerate(values):
+            ann_sheet.write(data_start + i, col, v, cell_fmt)
+        rows_for_size.append(values)
+    _autosize(ann_sheet, ann_headers, rows_for_size)
+    ann_sheet.set_column(2, 2, 60)
+    ann_sheet.freeze_panes(data_start, 0)
+
+    # 6. Change Log
     change_sheet = workbook.add_worksheet("Change Log")
     next_row = _write_header_band(change_sheet, tech_pack, "Change Log", title_fmt, meta_fmt, generated_at)
     change_headers = ["Timestamp", "Stage", "POM", "Field", "Old value", "New value", "Reason"]
