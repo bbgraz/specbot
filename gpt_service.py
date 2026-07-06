@@ -94,6 +94,36 @@ def _pdf_first_page_to_png_bytes(pdf_bytes: bytes) -> bytes | None:
     return None
 
 
+def _spec_block_prompt(metadata: dict[str, Any]) -> str:
+    """Category-standard spec block injected as the measurement baseline."""
+    from spec_blocks import get_spec_block
+
+    block = get_spec_block(
+        metadata.get("garment_type") or "", metadata.get("sample_size") or "M"
+    )
+    block_rows = [
+        {
+            "pom": m["pom"],
+            "description": m["description"],
+            "target": m["target"],
+            "tolerance_plus": m["tolerance_plus"],
+            "tolerance_minus": m["tolerance_minus"],
+        }
+        for m in block["measurements"]
+    ]
+    return (
+        f"\n\nCategory-standard spec block ({block['label']}):\n"
+        f"{json.dumps(block_rows, indent=1)}\n"
+        "Measurement grounding rules:\n"
+        "- Use these POMs as your baseline. Include every one of them.\n"
+        "- Keep the standard target unless the sketch or metadata clearly justifies "
+        "a different value; if you adjust, stay close to the standard and explain why in notes.\n"
+        "- Only add POMs beyond the block for features actually visible in the sketch "
+        "(label them derived_from_input).\n"
+        "- Never guess absolute dimensions from sketch proportions alone."
+    )
+
+
 def _build_user_content(
     file_bytes: bytes | None,
     mime_type: str | None,
@@ -110,6 +140,7 @@ def _build_user_content(
         "garment_summary, detected_features, suggested_measurements, "
         "construction_notes, bom_items, assumptions, missing_information.\n\n"
         f"Schema hint: {json.dumps(JSON_SCHEMA_HINT)}"
+        + _spec_block_prompt(metadata)
     )
 
     content: list[dict[str, Any]] = [{"type": "text", "text": metadata_block}]
@@ -190,14 +221,32 @@ def analyze_sketch(file: Any | None, metadata: dict[str, Any]) -> dict[str, Any]
     raw = response.choices[0].message.content or "{}"
     data = _safe_json_loads(raw)
 
+    # Enforce grounding server-side: the model was asked to stay on the
+    # category-standard block, but the merge below guarantees it.
+    from spec_blocks import ground_measurements
+
+    grounded, grounding_notes = ground_measurements(
+        data.get("suggested_measurements", []) or [],
+        metadata.get("garment_type") or "",
+        metadata.get("sample_size") or "M",
+    )
+
+    assumptions = list(data.get("assumptions", []) or [])
+    assumptions.append(
+        "Measurements are anchored on the category-standard spec block; "
+        "AI adjustments outside the plausibility window were rejected."
+    )
+    missing = list(data.get("missing_information", []) or [])
+    missing.extend(grounding_notes)
+
     return {
         "garment_summary": data.get("garment_summary", ""),
         "detected_features": data.get("detected_features", []) or [],
-        "suggested_measurements": data.get("suggested_measurements", []) or [],
+        "suggested_measurements": grounded,
         "construction_notes": data.get("construction_notes", []) or [],
         "bom_items": data.get("bom_items", []) or [],
-        "assumptions": data.get("assumptions", []) or [],
-        "missing_information": data.get("missing_information", []) or [],
+        "assumptions": assumptions,
+        "missing_information": missing,
     }
 
 

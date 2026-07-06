@@ -81,6 +81,59 @@ def t_safe_json():
 check("gpt_service tolerates fenced/dirty JSON", t_safe_json)
 
 
+# ---------------------------------------------------------------- spec blocks
+def t_spec_match():
+    from spec_blocks import match_category
+    assert match_category("crewneck tee") == "tee"
+    assert match_category("Zip Hoodie") == "sweatshirt"
+    assert match_category("oxford button-down shirt") == "woven_shirt"
+    assert match_category("slim chino pant") == "pants"
+    assert match_category("mystery garment") == "default"
+check("Spec blocks: garment type maps to category (longest keyword wins)", t_spec_match)
+
+def t_spec_size_projection():
+    from spec_blocks import get_spec_block
+    m_block = get_spec_block("tee", "M")
+    l_block = get_spec_block("tee", "L")
+    chest_m = next(m["target"] for m in m_block["measurements"] if m["pom"] == "Chest Width")
+    chest_l = next(m["target"] for m in l_block["measurements"] if m["pom"] == "Chest Width")
+    assert float(chest_l) - float(chest_m) == 1.0  # chest grade rule = 1.0/size
+    assert all(m["source"] == "inferred_from_standard_practice" for m in m_block["measurements"])
+check("Spec blocks: targets project across sizes via grade rules", t_spec_size_projection)
+
+def t_grounding():
+    from spec_blocks import ground_measurements, get_spec_block
+    block = get_spec_block("tee", "M")
+    n_block = len(block["measurements"])
+    ai = [
+        # plausible adjustment (within 35% of 21) -> accepted
+        {"pom": "Chest Width", "target": "22", "source": "derived_from_input", "notes": "wide fit per sketch"},
+        # implausible (9.5 -> 30) -> rejected, standard kept, flagged
+        {"pom": "Armhole Depth", "target": "30", "source": "derived_from_input"},
+        # extra POM not in block, not derived -> downgraded to placeholder
+        {"pom": "Pocket Width", "target": "5", "source": "inferred_from_standard_practice"},
+    ]
+    grounded, notes = ground_measurements(ai, "tee", "M")
+    by_pom = {m["pom"]: m for m in grounded}
+    assert by_pom["Chest Width"]["target"] == "22"
+    assert by_pom["Armhole Depth"]["target"] == "9.5"
+    assert by_pom["Armhole Depth"]["source"] == "placeholder_for_review"
+    assert any("Armhole Depth" in n for n in notes)
+    assert by_pom["Pocket Width"]["source"] == "placeholder_for_review"
+    assert len(grounded) == n_block + 1  # every block POM present + 1 extra
+check("Grounding: plausible AI values kept, implausible rejected, extras flagged", t_grounding)
+
+def t_offline_draft():
+    from spec_blocks import build_offline_draft
+    draft = build_offline_draft({"garment_type": "hoodie", "sample_size": "L", "fabric": "fleece"})
+    assert draft["suggested_measurements"] and draft["bom_items"] and draft["construction_notes"]
+    assert any("offline" in a.lower() or "no ai" in a.lower() for a in draft["assumptions"])
+    assert draft["missing_information"]
+    poms = [m["pom"] for m in draft["suggested_measurements"]]
+    assert "Hood Height" in poms
+check("Offline draft: full analysis shape from spec block, honest caveats", t_offline_draft)
+
+
 # ---------------------------------------------------------------- fit update (rule-based)
 def t_fit_delta():
     from fit_update_service import apply_fitting_notes
@@ -263,9 +316,27 @@ def t_ui_no_key_generate():
     subs = [b for b in at.button if "Generate" in (b.label or "")]
     subs[0].click().run()
     assert len(at.exception) == 0
-    errs = " ".join(str(e.value) for e in at.error)
-    assert "OPENAI_API_KEY" in errs or "GPT call failed" in errs, errs
-check("UI: Generate without API key fails gracefully with visible error", t_ui_no_key_generate)
+    warns = " ".join(str(w.value) for w in at.warning)
+    assert "offline draft" in warns.lower(), warns
+    tp = at.session_state["tech_pack"]
+    assert tp["style_number"] == "TST-001"
+    assert len(tp["measurements"]) >= 5
+    assert all(m["source"] == "inferred_from_standard_practice" for m in tp["measurements"])
+check("UI: Generate without API key falls back to offline spec-block draft", t_ui_no_key_generate)
+
+def t_ui_load_demo():
+    from streamlit.testing.v1 import AppTest
+    at = AppTest.from_file(str(APP_DIR / "app.py"), default_timeout=60)
+    at.run()
+    demo = [b for b in at.button if "Demo" in (b.label or "")]
+    assert demo, "Load Demo Tech Pack button not found"
+    demo[0].click().run()
+    assert len(at.exception) == 0
+    tp = at.session_state["tech_pack"]
+    assert tp["style_number"] == "TST-001" and tp["garment_type"] == "crewneck tee"
+    assert len(tp["measurements"]) >= 10 and tp["bom"] and tp["construction_notes"]
+    assert tp["assumptions"] and tp["missing_information"]
+check("UI: Load Demo Tech Pack populates a full tech pack offline", t_ui_load_demo)
 
 
 # ---------------------------------------------------------------- report

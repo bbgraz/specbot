@@ -43,6 +43,7 @@ from mock_data import (
     build_graded_table,
     get_grounding_report,
 )
+from spec_blocks import build_offline_draft
 from wip_store import add_or_update_wip_record, load_wip_records
 
 load_dotenv()
@@ -537,6 +538,23 @@ def section_brand_library() -> None:
         )
 
 
+def _load_demo_tech_pack() -> None:
+    """Populate the session with a fully offline demo style (no API key needed)."""
+    metadata = {
+        "style_name": "Demo Tee",
+        "style_number": "TST-001",
+        "garment_type": "crewneck tee",
+        "fabric": "180gsm cotton jersey",
+        "sample_size": "M",
+        "sample_stage": DEFAULT_STAGE,
+    }
+    analysis = build_offline_draft(metadata)
+    st.session_state.tech_pack = _to_tech_pack(analysis, metadata)
+    st.session_state.export_path = None
+    st.session_state.uploaded_sketch_bytes = None
+    st.session_state.uploaded_sketch_mime = None
+
+
 def section_style_setup() -> None:
     st.markdown("Drop a sketch and a few fields. Output appears in the **Tech Pack** tab.")
     with st.form("style_setup_form", clear_on_submit=False):
@@ -567,6 +585,22 @@ def section_style_setup() -> None:
 
         submitted = st.form_submit_button("Generate Tech Pack", type="primary")
 
+    demo_col, demo_help_col = st.columns([1, 3])
+    with demo_col:
+        demo_clicked = st.button("Load Demo Tech Pack", key="load_demo_btn")
+    with demo_help_col:
+        st.caption(
+            "No API key or sketch needed — loads a sample style built from the "
+            "category-standard spec block so every tab is populated."
+        )
+    if demo_clicked:
+        _load_demo_tech_pack()
+        st.success(
+            "Demo tech pack loaded (offline draft from the category-standard spec block). "
+            "Review it in the Tech Pack tab, then try fitting notes and export."
+        )
+        return
+
     if not submitted:
         return
 
@@ -591,6 +625,17 @@ def section_style_setup() -> None:
             st.session_state.uploaded_sketch_bytes = None
             st.session_state.uploaded_sketch_mime = None
 
+    if not os.getenv("OPENAI_API_KEY"):
+        analysis = build_offline_draft(metadata)
+        st.session_state.tech_pack = _to_tech_pack(analysis, metadata)
+        st.session_state.export_path = None
+        st.warning(
+            "No OPENAI_API_KEY configured — generated an offline draft from the "
+            "category-standard spec block instead. The sketch was NOT analyzed. "
+            "Add an API key to .env for AI sketch analysis."
+        )
+        return
+
     try:
         from gpt_service import analyze_sketch
     except Exception as exc:  # noqa: BLE001
@@ -601,8 +646,11 @@ def section_style_setup() -> None:
         try:
             analysis = analyze_sketch(upload, metadata)
         except Exception as exc:  # noqa: BLE001
-            st.error(f"GPT call failed: {exc}")
-            return
+            analysis = build_offline_draft(metadata)
+            st.warning(
+                f"GPT call failed ({exc}). Generated an offline draft from the "
+                "category-standard spec block instead — the sketch was NOT analyzed."
+            )
 
     st.session_state.tech_pack = _to_tech_pack(analysis, metadata)
     st.session_state.export_path = None

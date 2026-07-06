@@ -9,6 +9,11 @@ below.
 
 ## Demo flow
 
+> **No API key? No problem.** Click **Load Demo Tech Pack** in Style Setup to
+> populate every tab with an offline draft built from the category-standard
+> spec block. Generating without an `OPENAI_API_KEY` also falls back to the
+> same offline draft (with a clear warning that the sketch was not analyzed).
+
 1. **Style setup** — upload a sketch (PDF/JPG/PNG) and enter style metadata.
 2. **Tech pack preview** — review the AI-drafted garment summary,
    editable measurement table, construction notes, BOM, and any flagged
@@ -105,12 +110,14 @@ Health check is `/_stcore/health` (Streamlit's built-in endpoint).
 specbot/
   app.py                 Streamlit UI (single page)
   gpt_service.py         OpenAI GPT-4o calls (sketch + fitting notes)
+  spec_blocks.py         Category-standard POM spec blocks + AI grounding + offline drafts
   excel_exporter.py      Multi-sheet Excel export (xlsxwriter)
   fit_update_service.py  Apply fitting notes -> updated tech pack + change log
   email_sender.py        Resend or SMTP transport, test-mode redirect
   wip_store.py           JSON-backed WIP dashboard
   factory_contacts.json  5 demo factories with 2 contacts each
   wip_records.json       Created on first send
+  tests/test_specbot.py  Offline functional test suite (python tests/test_specbot.py)
   requirements.txt
   .env.example
   Dockerfile             Railway / docker build
@@ -128,6 +135,11 @@ specbot/
 - **WIP is local JSON.** Cleared by deleting `wip_records.json`.
 - **Email is test-mode only.** Every send is redirected to
   `TEST_EMAIL_RECIPIENT` — real factories are never contacted.
+- **Measurements are grounded, not vision-guessed.** Every garment category has
+  a standard POM spec block (`spec_blocks.py`); the AI can only adjust those
+  baselines, and adjustments outside a ±35% plausibility window are rejected
+  back to the standard value and flagged for review. Standard targets are
+  generic industry baselines — replace them with your brand's blocks.
 - **Generated measurements are draft suggestions.** Every value is labeled
   `derived_from_input`, `inferred_from_standard_practice`, or
   `placeholder_for_review`. **A technical designer must review** before any
