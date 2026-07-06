@@ -67,28 +67,27 @@ to `app.py` and are pure-JSON for easy editing during a demo.
 
 ## Deploy to Railway
 
-The repo's root `railway.json` deploys the BD API. SpecBot is a
-**separate Railway service** that builds from the `specbot/` directory.
+SpecBot is a standalone repo; Railway builds it from the repo root using
+the included `Dockerfile` and `railway.json`.
 
-One-time setup in your Railway project:
+One-time setup in your own Railway project:
 
-1. **New → Deploy from GitHub repo** → pick `bbgraz/bd-agent-system`.
-2. **Settings → Source → Root Directory** → set to `specbot`.
-3. **Settings → Source → Branch** → set to whichever branch you want
-   to demo from (e.g. `claude/specbot-ai-demo-3JdxH` or `main` after merge).
-4. **Variables** → add:
-   - `OPENAI_API_KEY`
+1. **New → Deploy from GitHub repo** → pick `bbgraz/specbot`.
+2. **Settings → Source → Branch** → set to `main`. Leave **Root
+   Directory** unset (the Dockerfile is at the repo root).
+3. **Variables** → add:
+   - `OPENAI_API_KEY` (your own key)
    - `TEST_EMAIL_RECIPIENT`
    - `EMAIL_FROM`
    - Either `RESEND_API_KEY`, or `SMTP_HOST` / `SMTP_PORT` /
      `SMTP_USERNAME` / `SMTP_PASSWORD`
-5. **Settings → Networking → Generate Domain** → Railway gives you the
+4. **Settings → Networking → Generate Domain** → Railway gives you the
    public URL (`<service>.up.railway.app`). Streamlit binds to `$PORT`
-   automatically via `specbot/railway.json`.
+   automatically.
 
 Health check is `/_stcore/health` (Streamlit's built-in endpoint).
 
-### What's in `specbot/` for Railway
+### What's in the repo for Railway
 
 - `Dockerfile` — Python 3.13 slim, installs `requirements.txt`, runs Streamlit on `$PORT`.
 - `railway.json` — tells Railway to use the Dockerfile and sets the start command + healthcheck.
