@@ -87,6 +87,20 @@ def set_wip_milestones(style_number: str, milestones: dict[str, str]) -> list[di
     return records
 
 
+def mark_milestone_done(style_number: str, milestone: str, done: bool = True) -> list[dict[str, Any]]:
+    """Toggle a milestone's completion for a style."""
+    records = load_wip_records()
+    for i, existing in enumerate(records):
+        if existing.get("style_number", "").strip() == style_number.strip():
+            done_list = [m for m in (existing.get("milestones_done") or []) if m != milestone]
+            if done:
+                done_list.append(milestone)
+            records[i] = {**existing, "milestones_done": done_list, "last_update": _now_iso()}
+            save_wip_records(records)
+            break
+    return records
+
+
 def add_or_update_wip_record(record: dict[str, Any]) -> list[dict[str, Any]]:
     """Insert or update a record keyed on style_number. Returns the full record list."""
     style_number = (record.get("style_number") or "").strip()

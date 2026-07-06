@@ -53,6 +53,7 @@ from wip_store import (
     add_or_update_wip_record,
     ensure_wip_record,
     load_wip_records,
+    mark_milestone_done,
     set_wip_milestones,
 )
 
@@ -2341,7 +2342,43 @@ def section_send_to_factory() -> None:
         )
 
 
-TNA_MILESTONES: list[str] = ["Proto due", "Fit session", "SMS due", "PP due", "Bulk delivery"]
+# Full production T&A milestone catalog, grouped by workstream.
+TNA_PHASES: dict[str, list[str]] = {
+    "Development": [
+        "Tech pack sent",
+        "Proto due",
+        "Fit 1",
+        "Fit 2",
+        "Fit 3",
+        "Grading approved",
+    ],
+    "Materials & approvals": [
+        "Lab dips approved",
+        "Strike-off approved",
+        "Bulk fabric in-house",
+        "Trims in-house",
+        "Test reports approved",
+    ],
+    "Sales & production": [
+        "SMS due",
+        "Costing locked",
+        "PO issued",
+        "Size set approved",
+        "PP approved",
+        "TOP approved",
+        "Final inspection",
+        "Ex-factory",
+        "Bulk delivery",
+    ],
+}
+TNA_MILESTONES: list[str] = [m for phase in TNA_PHASES.values() for m in phase]
+
+# Critical-path default shown in the calendar grid; any milestone that already
+# has a date is added automatically. The rest are one multiselect away.
+TNA_DEFAULT_TRACKED: list[str] = [
+    "Tech pack sent", "Proto due", "Fit 1", "Lab dips approved",
+    "Bulk fabric in-house", "SMS due", "PP approved", "Ex-factory",
+]
 
 
 def _parse_iso_date(value: str):
@@ -2356,6 +2393,7 @@ def _milestone_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     today = datetime.now().date()
     rows = []
     for r in records:
+        done = set(r.get("milestones_done") or [])
         for name in TNA_MILESTONES:
             d = _parse_iso_date((r.get("milestones") or {}).get(name, ""))
             if d is None:
@@ -2368,6 +2406,7 @@ def _milestone_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "date": d,
                     "days": (d - today).days,
                     "status": r.get("status", ""),
+                    "done": name in done,
                 }
             )
     rows.sort(key=lambda x: x["date"])
@@ -2387,7 +2426,7 @@ def _tab_wip_board(records: list[dict[str, Any]]) -> None:
     milestone_rows = _milestone_rows(records)
     next_by_style: dict[str, str] = {}
     for row in milestone_rows:
-        if row["days"] >= 0 and row["style_number"] not in next_by_style:
+        if row["days"] >= 0 and not row["done"] and row["style_number"] not in next_by_style:
             next_by_style[row["style_number"]] = f"{row['milestone']} · {row['date']}"
     df = pd.DataFrame(records)
     df["next_milestone"] = df["style_number"].map(next_by_style).fillna("—")
@@ -2405,7 +2444,7 @@ def _tab_wip_report(records: list[dict[str, Any]]) -> None:
         return
     today = datetime.now().date()
     milestone_rows = _milestone_rows(records)
-    overdue = [r for r in milestone_rows if r["days"] < 0]
+    overdue = [r for r in milestone_rows if r["days"] < 0 and not r["done"]]
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Styles on board", len(records))
@@ -2446,8 +2485,10 @@ def _tab_wip_report(records: list[dict[str, Any]]) -> None:
     export_rows = []
     for r in records:
         row = {k: v for k, v in r.items() if k != "milestones"}
+        done = set(r.get("milestones_done") or [])
         for name in TNA_MILESTONES:
-            row[name] = (r.get("milestones") or {}).get(name, "")
+            value = (r.get("milestones") or {}).get(name, "")
+            row[name] = f"{value} ✓" if value and name in done else value
         export_rows.append(row)
     csv = pd.DataFrame(export_rows).to_csv(index=False).encode("utf-8")
     st.download_button(
@@ -2464,16 +2505,35 @@ def _tab_wip_calendar(records: list[dict[str, Any]]) -> None:
         st.info("Generate a style first — then plan its T&A dates here.", icon="ℹ️")
         return
     st.caption(
-        f"{LIVE_BADGE}. Time & Action calendar — set target dates per style. "
-        "Overdue and upcoming milestones surface below and on the Board."
+        f"{LIVE_BADGE}. Time & Action calendar — set target dates per style across "
+        "development, materials, and production. Mark milestones done as they land; "
+        "overdue and upcoming items surface below and on the Board."
     )
+    dated = {
+        name
+        for r in records
+        for name in TNA_MILESTONES
+        if (r.get("milestones") or {}).get(name)
+    }
+    tracked = st.multiselect(
+        "Milestones in the grid",
+        options=TNA_MILESTONES,
+        default=[m for m in TNA_MILESTONES if m in dated or m in TNA_DEFAULT_TRACKED],
+        key="tna_tracked",
+        help="The full catalog covers development, materials/approvals, and "
+        "production gates — show the columns your team plans against.",
+    )
+    if not tracked:
+        st.info("Pick at least one milestone to plan against.")
+        return
+
     rows = []
     for r in records:
         row: dict[str, Any] = {
             "Style #": r.get("style_number", ""),
             "Name": r.get("style_name", ""),
         }
-        for name in TNA_MILESTONES:
+        for name in tracked:
             row[name] = _parse_iso_date((r.get("milestones") or {}).get(name, ""))
         rows.append(row)
     edited = st.data_editor(
@@ -2487,7 +2547,7 @@ def _tab_wip_calendar(records: list[dict[str, Any]]) -> None:
             "Name": st.column_config.TextColumn("Name", disabled=True),
             **{
                 name: st.column_config.DateColumn(name, format="YYYY-MM-DD")
-                for name in TNA_MILESTONES
+                for name in tracked
             },
         },
     )
@@ -2496,38 +2556,62 @@ def _tab_wip_calendar(records: list[dict[str, Any]]) -> None:
         style_number = str(row.get("Style #", "")).strip()
         if not style_number:
             continue
-        new_ms = {}
-        for name in TNA_MILESTONES:
+        existing_ms = {k: v for k, v in by_number.get(style_number, {}).items() if v}
+        # merge: grid columns take the edited value; untracked milestones keep theirs
+        new_ms = {k: v for k, v in existing_ms.items() if k not in tracked}
+        for name in tracked:
             value = row.get(name)
             if value is not None and str(value) != "NaT" and not (isinstance(value, float) and pd.isna(value)):
                 new_ms[name] = str(value)[:10]
-        if new_ms != {k: v for k, v in by_number.get(style_number, {}).items() if v}:
+        if new_ms != existing_ms:
             set_wip_milestones(style_number, new_ms)
 
     milestone_rows = _milestone_rows(load_wip_records())
-    overdue = [r for r in milestone_rows if r["days"] < 0]
-    upcoming = [r for r in milestone_rows if 0 <= r["days"] <= 14]
+    overdue = [r for r in milestone_rows if r["days"] < 0 and not r["done"]]
+    upcoming = [r for r in milestone_rows if 0 <= r["days"] <= 14 and not r["done"]]
+    recently_done = [r for r in milestone_rows if r["done"]]
+
+    def _done_button(r: dict[str, Any], idx: int, prefix: str) -> None:
+        if st.button("✓ done", key=f"{prefix}_done_{idx}"):
+            mark_milestone_done(r["style_number"], r["milestone"], True)
+            st.rerun()
+
     col_a, col_b = st.columns(2)
     with col_a:
         st.markdown("**🔴 Overdue**")
         if overdue:
-            for r in overdue:
-                st.markdown(
-                    f"- **{r['style_number']}** {r['milestone']} — {r['date']} "
+            for i, r in enumerate(overdue):
+                line, btn = st.columns([5, 1])
+                line.markdown(
+                    f"**{r['style_number']}** {r['milestone']} — {r['date']} "
                     f"({-r['days']} day{'s' if r['days'] != -1 else ''} late)"
                 )
+                with btn:
+                    _done_button(r, i, "ov")
         else:
             st.caption("Nothing overdue.")
     with col_b:
         st.markdown("**🟡 Next 14 days**")
         if upcoming:
-            for r in upcoming:
-                st.markdown(
-                    f"- **{r['style_number']}** {r['milestone']} — {r['date']} "
+            for i, r in enumerate(upcoming):
+                line, btn = st.columns([5, 1])
+                line.markdown(
+                    f"**{r['style_number']}** {r['milestone']} — {r['date']} "
                     f"(in {r['days']} day{'s' if r['days'] != 1 else ''})"
                 )
+                with btn:
+                    _done_button(r, i, "up")
         else:
             st.caption("Nothing due in the next two weeks.")
+
+    if recently_done:
+        with st.expander(f"✅ Completed milestones ({len(recently_done)})"):
+            for i, r in enumerate(recently_done):
+                line, btn = st.columns([5, 1])
+                line.markdown(f"**{r['style_number']}** {r['milestone']} — {r['date']}")
+                if btn.button("undo", key=f"done_undo_{i}"):
+                    mark_milestone_done(r["style_number"], r["milestone"], False)
+                    st.rerun()
 
 
 def section_wip_dashboard() -> None:

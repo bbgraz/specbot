@@ -557,6 +557,13 @@ def t_wip_ensure_and_milestones():
     wip_store.set_wip_milestones("AAA-1", {"Proto due": "2026-07-20", "SMS due": "2026-08-15"})
     recs = wip_store.load_wip_records()
     assert recs[0]["milestones"]["Proto due"] == "2026-07-20"
+    # done-marking persists and toggles
+    wip_store.mark_milestone_done("AAA-1", "Proto due", True)
+    recs = wip_store.load_wip_records()
+    assert recs[0]["milestones_done"] == ["Proto due"]
+    wip_store.mark_milestone_done("AAA-1", "Proto due", False)
+    recs = wip_store.load_wip_records()
+    assert recs[0]["milestones_done"] == []
     wip_store.WIP_PATH.unlink(missing_ok=True)
 check("WIP: auto-registration keeps sent status; T&A milestones persist", t_wip_ensure_and_milestones)
 
