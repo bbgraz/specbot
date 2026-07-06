@@ -1209,7 +1209,7 @@ def section_tech_pack_preview() -> None:
         f"Costing  {PREVIEW_BADGE}",
         f"Colorways  {PREVIEW_BADGE}",
         f"Annotations  {LIVE_BADGE}",
-        f"Revisions  {PREVIEW_BADGE}",
+        f"Revisions  {LIVE_BADGE}",
         "Assumptions",
     ]
     tabs = st.tabs(tab_labels)
